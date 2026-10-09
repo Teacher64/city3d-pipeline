@@ -1,0 +1,22 @@
+# classifier.txt — классы LAS 1.4 (ASPRS)
+# Формат: <код> <имя> [мин_точек]   # комментарий
+0   never_classified   0   # created, never classified
+1   unclassified       0   # не классифицировано
+2   ground             5000
+3   veg_low            1000
+4   veg_medium         1000
+5   veg_high           1000
+6   building           2000
+7   low_noise          0   # шум / низкие выбросы
+8   model_key_point    0   # ключевые точки модели
+9   water              500
+10  rail               500
+11  road_surface       2000
+12  overlap_points     0
+13  wire_guard         200
+14  wire_conductor     200
+15  transmission_tower 200
+16  wire_connector     200
+17  bridge_deck        500
+18  high_noise         0
+19  reserved           0

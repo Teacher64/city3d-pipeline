@@ -1,0 +1,166 @@
+{
+  "version": "1.0",
+  "comment": "Реестр локальных AI-моделей City3D. Путь к весам — относительный или абсолютный. Если веса отсутствуют, статус будет '⚠ нет весов'.",
+  "models": [
+    {
+      "id": "ransac",
+      "method": "M1",
+      "name": "RANSAC (Open3D)",
+      "role": "geometry",
+      "task": "Плоскости",
+      "kind": "classic",
+      "requires": [
+        "open3d"
+      ],
+      "weights": null,
+      "trained_on": "—",
+      "notes": "Без обучения. Быстрый baseline."
+    },
+    {
+      "id": "randla",
+      "method": "M1",
+      "name": "RandLA-Net",
+      "role": "semantic",
+      "task": "Сегментация облака",
+      "kind": "dl3d",
+      "requires": [
+        "torch",
+        "open3d"
+      ],
+      "weights": "~/projects/city3d_models/M1/randla_s3dis.pth",
+      "trained_on": "S3DIS (13 классов)",
+      "notes": "Рекомендуется после preprocess и M1."
+    },
+    {
+      "id": "kpconv",
+      "method": "M1",
+      "name": "KPConv",
+      "role": "semantic",
+      "task": "Сегментация облака",
+      "kind": "dl3d",
+      "requires": [
+        "torch"
+      ],
+      "weights": null,
+      "trained_on": "Semantic3D (8 классов)",
+      "notes": "Хорош на больших сценах (>50 млн точек)."
+    },
+    {
+      "id": "yolov8n",
+      "method": "M2",
+      "name": "YOLOv8n (Ultralytics)",
+      "role": "detect",
+      "task": "Детекция 2D",
+      "kind": "dl2d",
+      "requires": [
+        "ultralytics"
+      ],
+      "weights": "yolov8n.pt",
+      "trained_on": "COCO (80 классов)",
+      "notes": "Скачивает веса при первом запуске."
+    },
+    {
+      "id": "yoloworld",
+      "method": "M2",
+      "name": "YOLO-World",
+      "role": "detect_open",
+      "task": "Открытая детекция",
+      "kind": "dl2d",
+      "requires": [
+        "ultralytics"
+      ],
+      "weights": "yolov8s-worldv2.pt",
+      "trained_on": "COCO + LVIS, поддержка text prompt",
+      "notes": "Использует classifier.txt как список промптов."
+    },
+    {
+      "id": "unet",
+      "method": "M3",
+      "name": "U-Net (segm_models)",
+      "role": "semantic2d",
+      "task": "Сегментация 2D",
+      "kind": "dl2d",
+      "requires": [
+        "torch",
+        "segmentation_models_pytorch"
+      ],
+      "weights": "~/projects/city3d_models/M3/unet_buildings.pth",
+      "trained_on": "—  (fine-tune из ImageNet encoder)",
+      "notes": "Заменить SimpleSegNet в M3."
+    },
+    {
+      "id": "sam",
+      "method": "M3",
+      "name": "SAM ViT-H",
+      "role": "interactive",
+      "task": "Разметка",
+      "kind": "foundation",
+      "requires": [
+        "segment_anything",
+        "torch"
+      ],
+      "weights": "~/projects/city3d_models/M3/sam_vit_h.pth",
+      "trained_on": "SA-1B",
+      "notes": "Для интерактивной разметки оператором."
+    },
+    {
+      "id": "terrain_rf",
+      "method": "M4",
+      "name": "RandomForest DEM",
+      "role": "feature",
+      "task": "Классификация рельефа",
+      "kind": "ml",
+      "requires": [
+        "sklearn",
+        "rasterio"
+      ],
+      "weights": "~/projects/city3d_models/M4/rf_terrain.pkl",
+      "trained_on": "—",
+      "notes": "Признаки: slope, aspect, TPI, curvature."
+    },
+    {
+      "id": "asprs_stat",
+      "method": "M5",
+      "name": "ASPRS-статистика",
+      "role": "reference",
+      "task": "Валидация меток",
+      "kind": "classic",
+      "requires": [
+        "laspy",
+        "numpy"
+      ],
+      "weights": null,
+      "trained_on": "—",
+      "notes": "Без обучения. Использует classification из LAS."
+    },
+    {
+      "id": "gis_vector",
+      "method": "M6",
+      "name": "GIS-вектор",
+      "role": "reference",
+      "task": "Кросс-валидация",
+      "kind": "classic",
+      "requires": [
+        "geopandas"
+      ],
+      "weights": null,
+      "trained_on": "—",
+      "notes": "SXF/SHP как эталон для M1/M3."
+    },
+    {
+      "id": "lgbm_fuse",
+      "method": "fuse",
+      "name": "LightGBM fusion",
+      "role": "fuse",
+      "task": "Стеккинг M1–M6",
+      "kind": "ml",
+      "requires": [
+        "lightgbm",
+        "sklearn"
+      ],
+      "weights": "~/projects/city3d_models/ensemble/lgbm_v1.txt",
+      "trained_on": "—",
+      "notes": "Вход: признаки всех методов."
+    }
+  ]
+}

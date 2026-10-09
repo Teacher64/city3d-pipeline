@@ -1,0 +1,50 @@
+# --- Point cloud data ---
+*.las
+*.laz
+*.ply
+*.pcd
+*.xyz
+*.e57
+*.bin
+
+# --- ML models and checkpoints ---
+models/
+*.pth
+*.pkl
+*.tar
+*.meta
+*.index
+*.data-*
+
+# --- Training artifacts ---
+training_output/
+datasets/
+*.npz
+*.h5
+*.hdf5
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.venv/
+env/
+.pytest_cache/
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# --- Logs, temp, secrets ---
+*.log
+*.tmp
+/tmp/
+nohup.out
+*.key
+*.pem
+.env
+secrets.json
