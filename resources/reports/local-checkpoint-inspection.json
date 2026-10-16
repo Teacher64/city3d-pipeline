@@ -1,0 +1,116 @@
+[
+  {
+    "path": "/home/michel/projects/city3d_models/M1/kpconv_s3dis.pth",
+    "validated": false,
+    "approved": false,
+    "keys": [
+      "epoch",
+      "model_state_dict",
+      "optimizer_state_dict",
+      "saving_path"
+    ],
+    "tensor_shapes": {},
+    "status": "safe_state_inspected; architecture/config/labels not established"
+  },
+  {
+    "path": "/home/michel/projects/city3d_models/M3/unet_buildings.pth",
+    "validated": false,
+    "approved": false,
+    "keys": [
+      "encoder._conv_stem.weight",
+      "encoder._bn0.weight",
+      "encoder._bn0.bias",
+      "encoder._bn0.running_mean",
+      "encoder._bn0.running_var",
+      "encoder._bn0.num_batches_tracked",
+      "encoder._blocks.0._depthwise_conv.weight",
+      "encoder._blocks.0._bn1.weight",
+      "encoder._blocks.0._bn1.bias",
+      "encoder._blocks.0._bn1.running_mean",
+      "encoder._blocks.0._bn1.running_var",
+      "encoder._blocks.0._bn1.num_batches_tracked",
+      "encoder._blocks.0._se_reduce.weight",
+      "encoder._blocks.0._se_reduce.bias",
+      "encoder._blocks.0._se_expand.weight",
+      "encoder._blocks.0._se_expand.bias",
+      "encoder._blocks.0._project_conv.weight",
+      "encoder._blocks.0._bn2.weight",
+      "encoder._blocks.0._bn2.bias",
+      "encoder._blocks.0._bn2.running_mean"
+    ],
+    "tensor_shapes": {
+      "encoder._conv_stem.weight": [
+        48,
+        3,
+        3,
+        3
+      ],
+      "encoder._bn0.weight": [
+        48
+      ],
+      "encoder._bn0.bias": [
+        48
+      ],
+      "encoder._bn0.running_mean": [
+        48
+      ],
+      "encoder._bn0.running_var": [
+        48
+      ],
+      "encoder._bn0.num_batches_tracked": [],
+      "encoder._blocks.0._depthwise_conv.weight": [
+        48,
+        1,
+        3,
+        3
+      ],
+      "encoder._blocks.0._bn1.weight": [
+        48
+      ],
+      "encoder._blocks.0._bn1.bias": [
+        48
+      ],
+      "encoder._blocks.0._bn1.running_mean": [
+        48
+      ],
+      "encoder._blocks.0._bn1.running_var": [
+        48
+      ],
+      "encoder._blocks.0._bn1.num_batches_tracked": [],
+      "encoder._blocks.0._se_reduce.weight": [
+        12,
+        48,
+        1,
+        1
+      ],
+      "encoder._blocks.0._se_reduce.bias": [
+        12
+      ],
+      "encoder._blocks.0._se_expand.weight": [
+        48,
+        12,
+        1,
+        1
+      ],
+      "encoder._blocks.0._se_expand.bias": [
+        48
+      ],
+      "encoder._blocks.0._project_conv.weight": [
+        24,
+        48,
+        1,
+        1
+      ],
+      "encoder._blocks.0._bn2.weight": [
+        24
+      ],
+      "encoder._blocks.0._bn2.bias": [
+        24
+      ],
+      "encoder._blocks.0._bn2.running_mean": [
+        24
+      ]
+    },
+    "status": "safe_state_inspected; architecture/config/labels not established"
+  }
+]

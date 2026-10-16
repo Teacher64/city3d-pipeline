@@ -1,0 +1,29 @@
+{
+  "outdoor_candidate": {
+    "id": "spt_nano_dales",
+    "url": "https://zenodo.org/records/8042712/files/spt-2_nano_dales.ckpt?download=1",
+    "filename": "spt-2_nano_dales.ckpt",
+    "md5": "d7442d12b6986deaeb94465f7eb52d04",
+    "source": "https://zenodo.org/records/8042712",
+    "upstream_version": "v1",
+    "domain": "ALS DALES",
+    "license_status": "not independently established; do not redistribute",
+    "format": "pytorch lightning checkpoint; never automatically unpickled",
+    "dependencies": [
+      "official SPT revision/config",
+      "torch_scatter",
+      "torch_sparse",
+      "compiled partition libraries"
+    ]
+  },
+  "download_status": "blocked: DNS in shell; web binary fetch cannot save binary",
+  "raster_segmentation": {
+    "status": "not_selected",
+    "reason": "No georeferenced imagery + compatible model bands/GSD supplied; existing SRTM is a DEM, not RGB orthophoto",
+    "sources": [
+      "https://github.com/opengeos/geoai",
+      "https://github.com/Pointcept/Pointcept"
+    ]
+  },
+  "mapping_source": "https://github.com/PRBonn/semantic-kitti-api/blob/master/config/semantic-kitti.yaml"
+}

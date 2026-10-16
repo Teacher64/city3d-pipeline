@@ -161,6 +161,116 @@
       "weights": "~/projects/city3d_models/ensemble/lgbm_v1.txt",
       "trained_on": "—",
       "notes": "Вход: признаки всех методов."
+    },
+    {
+      "id": "geoai_building_seg",
+      "method": "M3",
+      "name": "GeoAI Building Seg",
+      "role": "semantic2d",
+      "task": "Здания из GeoTIFF",
+      "kind": "geoai",
+      "requires": [
+        "geoai",
+        "rasterio",
+        "torch"
+      ],
+      "weights": "models/M3/geoai_building_v1.pth",
+      "trained_on": "WHU Building Dataset",
+      "notes": "opengeos/geoai — pip install geoai-py. Поддерживает orthogonalize() для векторизации."
+    },
+    {
+      "id": "geoai_road_seg",
+      "method": "M3",
+      "name": "GeoAI Road Seg",
+      "role": "semantic2d",
+      "task": "Дороги из GeoTIFF",
+      "kind": "geoai",
+      "requires": [
+        "geoai",
+        "rasterio",
+        "torch"
+      ],
+      "weights": "models/M3/geoai_road_v1.pth",
+      "trained_on": "DeepGlobe Road",
+      "notes": "opengeos/geoai для дорожной сети."
+    },
+    {
+      "id": "geoai_water_seg",
+      "method": "M3",
+      "name": "GeoAI Water Seg",
+      "role": "semantic2d",
+      "task": "Вода из GeoTIFF",
+      "kind": "geoai",
+      "requires": [
+        "geoai",
+        "rasterio",
+        "torch"
+      ],
+      "weights": "models/M3/geoai_water_v1.pth",
+      "trained_on": "Water Bodies Dataset",
+      "notes": "Реки, каналы, водоёмы."
+    },
+    {
+      "id": "sam_vit_h",
+      "method": "M3",
+      "name": "SAM ViT-H (Meta)",
+      "role": "interactive",
+      "task": "Интерактивная разметка",
+      "kind": "foundation",
+      "requires": [
+        "segment_anything",
+        "torch"
+      ],
+      "weights": "models/M3/sam_vit_h_4b8939.pth",
+      "trained_on": "SA-1B",
+      "notes": "Для ручной разметки эталонов."
+    },
+    {
+      "id": "gs_3dgs_modelscope",
+      "method": "export",
+      "name": "3D Gaussian Splatting (ModelScope)",
+      "role": "export",
+      "task": "Gaussian Splatting → .ply / .splat",
+      "kind": "gs",
+      "requires": [
+        "torch",
+        "plyfile"
+      ],
+      "weights": "models/GS/gs_scene_v1.ply",
+      "trained_on": "—  (обучается на вашем облаке)",
+      "notes": "3DGS: pip install gsplat. Обучение из LAS/PLY → .splat для Cesium / SuperSplat. Оптимально для web-визуализации."
+    },
+    {
+      "id": "gs_2dgs_surfel",
+      "method": "export",
+      "name": "2D Gaussian Splatting (Surface)",
+      "role": "export",
+      "task": "2DGS → mesh / .ply",
+      "kind": "gs",
+      "requires": [
+        "torch",
+        "open3d"
+      ],
+      "weights": "models/GS/2dgs_scene_v1.ply",
+      "trained_on": "—  (обучается на вашем облаке)",
+      "notes": "2DGS даёт более плотную поверхность. Установка: git clone https://github.com/hbb1/2d-gaussian-splatting"
+    },
+    {
+      "id": "pointcept_ptv3",
+      "method": "M1",
+      "name": "PointTransformer v3",
+      "role": "semantic",
+      "task": "SOTA 3D-сегментация",
+      "kind": "dl3d",
+      "requires": [
+        "torch",
+        "pointcept",
+        "flash_attn"
+      ],
+      "weights": "models/M1/ptv3_scannet200.pth",
+      "trained_on": "ScanNet200 (200 классов)",
+      "notes": "Тяжёлая. Требует GPU 16+ ГБ. Установка: git clone https://github.com/Pointcept/Pointcept"
     }
-  ]
+  ],
+  "updated_at": "2026-10-12T18:50:29.638912"
 }

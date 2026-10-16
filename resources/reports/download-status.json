@@ -1,0 +1,22 @@
+{
+  "id": "spt_nano_dales",
+  "url": "https://zenodo.org/records/8042712/files/spt-2_nano_dales.ckpt?download=1",
+  "filename": "spt-2_nano_dales.ckpt",
+  "md5": "d7442d12b6986deaeb94465f7eb52d04",
+  "source": "https://zenodo.org/records/8042712",
+  "upstream_version": "v1",
+  "domain": "ALS DALES",
+  "license_status": "not independently established; do not redistribute",
+  "format": "pytorch lightning checkpoint; never automatically unpickled",
+  "dependencies": [
+    "official SPT revision/config",
+    "torch_scatter",
+    "torch_sparse",
+    "compiled partition libraries"
+  ],
+  "status": "failed",
+  "sha256_reference": null,
+  "local_sha256": null,
+  "attempt": 1,
+  "error": "<urlopen error [Errno -3] Temporary failure in name resolution>"
+}

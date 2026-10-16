@@ -48,3 +48,45 @@ nohup.out
 *.pem
 .env
 secrets.json
+
+# --- Backups (НЕ коммитить) ---
+*.bak
+*.bak-*
+*.backup
+*.orig
+*.save
+*_backup_*
+*copy*.py
+*BAK[0-9]*
+*BAK[0-9].py
+city3d_pipeline_v5BAK*
+city3d_pipeline_v574.py
+deepseek_bash_*.sh
+
+# --- Build artifacts ---
+build/
+dist/
+*.egg-info/
+logs/
+
+# --- Ортофотопланы / растры (большие файлы) ---
+*.tif
+*.tiff
+*.geotiff
+*.jp2
+
+# --- Векторы ГИС (большие файлы) ---
+*.shp
+*.shx
+*.dbf
+*.sxf
+*.gml
+*.kml
+*.kmz
+*.gpkg
+
+# --- БД ---
+*.sqlite
+*.sqlite3
+*.db
+*.mdb

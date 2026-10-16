@@ -1,0 +1,45 @@
+{
+  "at": "2026-10-16T07:51:59.248929+00:00",
+  "python": "/home/michel/city3d_env/bin/python",
+  "python_version": "3.14.4 (main, Aug 20 2026, 10:41:58) [GCC 15.2.0]",
+  "target": "/mnt/data_sda1/PR_3D_SPB/city3d-pipeline/city3d_pipeline_v5.py",
+  "dependencies": {
+    "laspy": {
+      "status": "available",
+      "version": "2.7.0"
+    },
+    "pyproj": {
+      "status": "available",
+      "version": "3.8.0"
+    },
+    "shapely": {
+      "status": "available",
+      "version": "2.1.2"
+    },
+    "PyQt5.QtWidgets": {
+      "status": "available",
+      "version": "unknown"
+    },
+    "matplotlib": {
+      "status": "available",
+      "version": "3.11.2"
+    },
+    "pytest": {
+      "status": "available",
+      "version": "9.0.2"
+    },
+    "rasterio": {
+      "status": "available",
+      "version": "1.5.2"
+    }
+  },
+  "checks": {
+    "main_syntax": "passed"
+  },
+  "tests": {
+    "exit_code": 1,
+    "stdout": "...........F....                                                         [100%]\n=================================== FAILURES ===================================\n___________________________ test_editor_arc_and_undo ___________________________\n\nmonkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7ba5ed3196e0>\n\n    def test_editor_arc_and_undo(monkeypatch):\n        monkeypatch.setenv('QT_QPA_PLATFORM','offscreen')\n        from PyQt5.QtWidgets import QApplication\n>       from city3d_fixes.editor import BoundaryEditor\n\ntests/test_fixes.py:127: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n../city3d_fixes/editor.py:6: in <module>\n    from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT\n/home/michel/city3d_env/lib/python3.14/site-packages/matplotlib/backends/backend_qt5agg.py:7: in <module>\n    from .backend_qtagg import (    # noqa: F401, E402 # pylint: disable=W0611\n/home/michel/city3d_env/lib/python3.14/site-packages/matplotlib/backends/backend_qtagg.py:9: in <module>\n    from .qt_compat import QT_API, QtCore, QtGui\n/home/michel/city3d_env/lib/python3.14/site-packages/matplotlib/backends/qt_compat.py:109: in <module>\n    _setup_pyqt5plus()\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\n    def _setup_pyqt5plus():\n        global QtCore, QtGui, QtWidgets, QtSvg, __version__\n        global _isdeleted, _to_int\n    \n        if QT_API == QT_API_PYQT6:\n            from PyQt6 import QtCore, QtGui, QtWidgets, sip, QtSvg\n            __version__ = QtCore.PYQT_VERSION_STR\n            QtCore.Signal = QtCore.pyqtSignal\n            QtCore.Slot = QtCore.pyqtSlot\n            QtCore.Property = QtCore.pyqtProperty\n            _isdeleted = sip.isdeleted\n            _to_int = operator.attrgetter('value')\n        elif QT_API == QT_API_PYSIDE6:\n            from PySide6 import QtCore, QtGui, QtWidgets, QtSvg, __version__\n            import shiboken6\n            def _isdeleted(obj): return not shiboken6.isValid(obj)\n            if parse_version(__version__) >= parse_version('6.4'):\n                _to_int = operator.attrgetter('value')\n            else:\n                _to_int = int\n        elif QT_API == QT_API_PYQT5:\n>           from PyQt5 import QtCore, QtGui, QtWidgets, QtSvg\nE           ImportError: cannot import name 'QtSvg' from 'PyQt5' (/usr/lib/python3/dist-packages/PyQt5/__init__.py)\n\n/home/michel/city3d_env/lib/python3.14/site-packages/matplotlib/backends/qt_compat.py:87: ImportError\n=============================== warnings summary ===============================\n../../../../../home/michel/city3d_env/lib/python3.14/site-packages/laspy/vlrs/known.py:197\n  /home/michel/city3d_env/lib/python3.14/site-packages/laspy/vlrs/known.py:197: DeprecationWarning: Due to '_pack_', the 'ExtraBytesStruct' Structure will use memory layout compatible with MSVC (Windows). If this is intended, set _layout_ to 'ms'. The implicit default is deprecated and slated to become an error in Python 3.19.\n    class ExtraBytesStruct(ctypes.LittleEndianStructure):\n\n../../../../../home/michel/city3d_env/lib/python3.14/site-packages/laspy/vlrs/known.py:554\n  /home/michel/city3d_env/lib/python3.14/site-packages/laspy/vlrs/known.py:554: DeprecationWarning: Due to '_pack_', the 'WaveformPacketStruct' Structure will use memory layout compatible with MSVC (Windows). If this is intended, set _layout_ to 'ms'. The implicit default is deprecated and slated to become an error in Python 3.19.\n    class WaveformPacketStruct(ctypes.LittleEndianStructure):\n\n../../../../../home/michel/city3d_env/lib/python3.14/site-packages/laspy/vlrs/known.py:597\n  /home/michel/city3d_env/lib/python3.14/site-packages/laspy/vlrs/known.py:597: DeprecationWarning: Due to '_pack_', the 'GeoKeyEntryStruct' Structure will use memory layout compatible with MSVC (Windows). If this is intended, set _layout_ to 'ms'. The implicit default is deprecated and slated to become an error in Python 3.19.\n    class GeoKeyEntryStruct(ctypes.LittleEndianStructure):\n\n../../../../../home/michel/city3d_env/lib/python3.14/site-packages/laspy/vlrs/known.py:634\n  /home/michel/city3d_env/lib/python3.14/site-packages/laspy/vlrs/known.py:634: DeprecationWarning: Due to '_pack_', the 'GeoKeysHeaderStructs' Structure will use memory layout compatible with MSVC (Windows). If this is intended, set _layout_ to 'ms'. The implicit default is deprecated and slated to become an error in Python 3.19.\n    class GeoKeysHeaderStructs(ctypes.LittleEndianStructure):\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n=========================== short test summary info ============================\nFAILED tests/test_fixes.py::test_editor_arc_and_undo - ImportError: cannot im...\n1 failed, 15 passed, 4 warnings in 2.42s\n",
+    "stderr": ""
+  },
+  "status": "failed_or_incomplete"
+}

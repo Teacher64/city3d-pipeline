@@ -1,0 +1,10 @@
+{
+  "version":"semantickitti-official-1",
+  "source":"https://github.com/PRBonn/semantic-kitti-api/blob/master/config/semantic-kitti.yaml",
+  "verified":"2026-10-14",
+  "raw_to_train":{"40":9,"50":13,"51":14,"70":15,"71":16,"80":18,"81":19},
+  "train_to_canonical":{"9":"las:11","13":"las:6","14":"city:fence","15":"city:vegetation","16":"city:trunk","18":"city:pole","19":"city:traffic_sign"},
+  "output_index_policy":"Must be declared by checkpoint: train-id or train-id-minus-one; never infer from model name",
+  "relations":{"vegetation":"broader than LAS 3/4/5: reverse mapping ambiguous","building":"exact whole-building semantic only; not roof/wall"},
+  "unlisted_raw_ids":"unmapped; retained as unknown mass"
+}

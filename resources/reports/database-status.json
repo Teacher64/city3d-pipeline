@@ -1,0 +1,9 @@
+{
+  "database": "city3d",
+  "config_status": "saved outside release; mode 0600",
+  "connection_status": "blocked",
+  "backup_status": "blocked",
+  "live_schema_changed": false,
+  "connection_error_type": "OperationalError",
+  "backup_error_type": "RuntimeError"
+}

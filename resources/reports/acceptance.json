@@ -1,0 +1,11 @@
+{
+  "code_version": "7.5.0",
+  "unit_tests_passed": 46,
+  "GUI": "10 tabs, F1, local LAS/vector rendering, coloring and opacity tested offscreen; real GL not tested",
+  "database": "migration SQL and geometry constraints tested in isolated single-user PostgreSQL/PostGIS; live DB and pg_dump blocked by socket sandbox",
+  "outdoor_weights": "download attempted; failed DNS; no validated 3D neural inference",
+  "M3": "actual training/reload/fine-tune/georeferenced inference tested with synthetic reviewed fixtures; not validated on real imagery",
+  "Panorama": "SDK/ABI/license/fixture unavailable; blocked",
+  "DEB": "built; clean install and upgrade not tested",
+  "limitations": "See README_RU.md; full prompt production gates are not all passed"
+}

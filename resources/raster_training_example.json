@@ -1,0 +1,9 @@
+{
+ "labels_provenance":"gold",
+ "class_keys":["state:unknown","las:6"],
+ "bands":[1,2,3], "mean":[0,0,0], "std":[255,255,255],
+ "tiles":[
+  {"image":"area_A_rgb.tif","mask":"area_A_mask.tif","group":"territory-A","split":"train"},
+  {"image":"area_B_rgb.tif","mask":"area_B_mask.tif","group":"territory-B","split":"val"}
+ ]
+}

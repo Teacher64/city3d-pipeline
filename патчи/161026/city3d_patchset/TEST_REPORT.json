@@ -1,0 +1,45 @@
+{
+  "at": "2026-10-16T07:31:24.398969+00:00",
+  "python": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/bin/python",
+  "python_version": "3.12.14 (main, Aug 25 2026, 14:00:49) [Clang 22.1.3 ]",
+  "target": "upload/city3d_pipeline_v5(3).py",
+  "dependencies": {
+    "laspy": {
+      "status": "available",
+      "version": "2.7.0"
+    },
+    "pyproj": {
+      "status": "available",
+      "version": "3.8.0"
+    },
+    "shapely": {
+      "status": "available",
+      "version": "2.2.0"
+    },
+    "PyQt5.QtWidgets": {
+      "status": "available",
+      "version": "unknown"
+    },
+    "matplotlib": {
+      "status": "available",
+      "version": "3.11.2"
+    },
+    "pytest": {
+      "status": "available",
+      "version": "9.1.1"
+    },
+    "rasterio": {
+      "status": "available",
+      "version": "1.5.2"
+    }
+  },
+  "checks": {
+    "main_syntax": "passed"
+  },
+  "tests": {
+    "exit_code": 0,
+    "stdout": "................                                                         [100%]\n=============================== warnings summary ===============================\ncity3d_patchset/tests/test_fixes.py::test_merged_all_sources_and_identity\ncity3d_patchset/tests/test_fixes.py::test_polygon_clip_includes_edges\ncity3d_patchset/tests/test_fixes.py::test_export[LAS-.las]\ncity3d_patchset/tests/test_fixes.py::test_export[LAZ-.laz]\ncity3d_patchset/tests/test_fixes.py::test_export[CSV-.csv]\ncity3d_patchset/tests/test_fixes.py::test_export[BOUNDARY-.geojson]\ncity3d_patchset/tests/test_fixes.py::test_export[BOUNDARY-.geojson]\ncity3d_patchset/tests/test_fixes.py::test_real_load_tab_checkboxes_and_active_project\n  /workspace/scratch/02bd204feca8/city3d_patchset/payload/city3d_fixes/project.py:60: DeprecationWarning: The 'shapely.ops.transform()' function is deprecated. Use 'shapely.transform()' or 'shapely.transform_coordseq()' instead. See https://shapely.readthedocs.io/en/latest/manual.html#shapely.ops.transform for more details.\n    result = transform(group.transformers[0].transform, geometry)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n16 passed, 8 warnings in 2.86s\n",
+    "stderr": ""
+  },
+  "status": "passed"
+}

@@ -1,0 +1,13 @@
+{
+  "root": "/opt/panorama",
+  "libraries": [],
+  "headers": [],
+  "status": "blocked",
+  "geometry_import": false,
+  "exact_rsc_rendering": false,
+  "reason": "SDK/version/ABI/license and supported MAPAPI signatures need verification",
+  "documentation": [
+    "https://help.gisinfo.ru/api/python/index.html",
+    "https://help.gisinfo.ru/api/cpp/index.html"
+  ]
+}

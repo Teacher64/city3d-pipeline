@@ -28,28 +28,46 @@ from pathlib import Path
 
 import numpy as np
 
+# PATCHED_PARALLEL_V1 + FIX_M5_V2_APPLIED
+import multiprocessing as _mp
+import os as _os
+from concurrent.futures import (
+    ThreadPoolExecutor as _TPE,
+    as_completed as _as_completed,
+)
+
+_N_CPU = max(1, _mp.cpu_count())
+# Пользователь может ограничить число воркеров через env:
+#   export CITY3D_WORKERS=4   # тихий режим
+try:
+    _N_THREADS = max(1, int(_os.environ.get(
+        "CITY3D_WORKERS", str(max(1, _N_CPU - 1)))))
+except Exception:
+    _N_THREADS = max(1, _N_CPU - 1)
+print(f"[PARALLEL v2] CPU: {_N_CPU}, "
+      f"воркеров: {_N_THREADS} "
+      f"(переопределить: CITY3D_WORKERS=N)")
+
 try:
     import open3d as o3d
 except ImportError:
     o3d = None
 
-PROJECT_ROOT = Path("/mnt/data_sda1/PR_3D_SPB")
-WORKSPACE = PROJECT_ROOT / "workspace"
-WORKSPACE.mkdir(parents=True, exist_ok=True)
-
-PROJECTS_DIR = Path.home() / "projects"
-PROJECTS_DIR.mkdir(exist_ok=True)
-
-DATASETS_DIR = WORKSPACE / "datasets"
-DATASETS_DIR.mkdir(exist_ok=True)
-
-TRAINING_OUTPUT_DIR = WORKSPACE / "training_output"
-TRAINING_OUTPUT_DIR.mkdir(exist_ok=True)
-
-REFERENCE_DB_PATH = WORKSPACE / "references.sqlite"
-
-# Путь к файлу справочника EPSG
-EPSG_CATALOG_PATH = Path(__file__).parent / "crslist.json"
+# Unified resolver: importing the GUI does not create user directories.
+import json as _json_top
+from city3d_backend.settings import read_settings, resolve_paths, save_settings
+_APP_SETTINGS = read_settings()
+_PATHS_CFG = _APP_SETTINGS.get("paths", {}) or {}
+_RESOLVED_PATHS = resolve_paths(_APP_SETTINGS, Path(__file__).parent)
+PROJECT_ROOT = _RESOLVED_PATHS["project_root"]
+WORKSPACE = _RESOLVED_PATHS["workspace"]
+PROJECTS_DIR = _RESOLVED_PATHS["projects_dir"]
+DATASETS_DIR = _RESOLVED_PATHS["datasets_dir"]
+TRAINING_OUTPUT_DIR = _RESOLVED_PATHS["training_output_dir"]
+REFERENCE_DB_PATH = _RESOLVED_PATHS["reference_db"]
+EPSG_CATALOG_PATH = _RESOLVED_PATHS["epsg_catalog"]
+SLICES_DIR = _RESOLVED_PATHS["slices_dir"]
+os.environ.setdefault("HF_HOME", str(_RESOLVED_PATHS["hf_cache"]))
 
 MODELS = {
     "Cloud2BIM": PROJECTS_DIR / "Cloud2BIM",
@@ -59,15 +77,32 @@ MODELS = {
     "3d_cad_pointcloud": PROJECTS_DIR / "3d_cad_pointcloud",
 }
 
+# PATCHED_SETTINGS_TAB_V2: DB_PARAMS from settings.json
+_DB_CFG = _APP_SETTINGS.get("database", {}) or {}
+
 DB_PARAMS = {
-    "dbname":   "city3d",
-    "host":     "localhost",
-    "port":     "5432",
-    "user":     "postgres",
-    "password": "postgres",
-    "schema_refs":    "refs",
-    "schema_history": "history",
+    "dbname":   _DB_CFG.get("dbname",   "city3d"),
+    "host":     _DB_CFG.get("host",     "localhost"),
+    "port":     str(_DB_CFG.get("port", "5432")),
+    "user":     _DB_CFG.get("user",     "postgres"),
+    "password": _DB_CFG.get("password", ""),
+    "schema_refs":    _DB_CFG.get("schema_refs",    "refs"),
+    "schema_history": _DB_CFG.get("schema_history", "history"),
 }
+
+_DB_EXTERNAL = _APP_SETTINGS.get("database_config_file") or os.environ.get("CITY3D_DB_CONFIG")
+if not _DB_EXTERNAL:
+    _candidate=Path.home()/"Documents"/"подключение к базе данных.json"
+    if _candidate.is_file():_DB_EXTERNAL=str(_candidate)
+if _DB_EXTERNAL:
+    from city3d_backend.database import load_connection_file
+    try:
+        _external_params=load_connection_file(_DB_EXTERNAL)
+        for _key in ("host","port","user","password","service","sslmode","dbname"):
+            if _key in _external_params and _key != "dbname":DB_PARAMS[_key]=_external_params[_key]
+        if "password" not in _external_params and "password" not in _DB_CFG:DB_PARAMS.pop("password",None)
+    except (ValueError,OSError,KeyError):
+        print("[DB] Конфигурация подключения требует проверки формата; значения не изменены")
 
 SUPPORTED_INPUT_FORMATS = [
     ".las", ".laz", ".ply", ".pcd", ".xyz", ".e57", ".bin", ".txt"
@@ -84,7 +119,8 @@ from PyQt5.QtWidgets import (
     QDoubleSpinBox, QSpinBox, QSplitter, QListWidget, QListWidgetItem,
     QScrollArea, QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
     QStackedWidget, QDialog, QDialogButtonBox, QCompleter, QTableView,
-    QAbstractItemView, QStyledItemDelegate, QStyle
+    QAbstractItemView, QStyledItemDelegate, QStyle,
+    QSizePolicy
 )
 from PyQt5.QtCore import (
     Qt, QThread, pyqtSignal, QStringListModel,
@@ -107,6 +143,8 @@ except ImportError:
 from PyQt5.QtGui import QFont, QTextCursor, QStandardItemModel, QStandardItem
 
 try:
+    if os.environ.get("CITY3D_DISABLE_WEBENGINE") == "1":
+        raise ImportError("WebEngine disabled by environment")
     from PyQt5.QtWebEngineWidgets import QWebEngineView
     HAS_WEBENGINE = True
 except ImportError:
@@ -300,8 +338,7 @@ RETURNS TABLE (
     started_at TIMESTAMPTZ, overlap_area_m2 REAL)
 LANGUAGE sql STABLE AS $$
     SELECT r.id, r.method, r.scanning_type, r.started_at,
-           ST_Area(ST_Transform(
-               ST_Intersection(r.bbox_4326, p_geom), 3857))::real AS overlap_area_m2
+           ST_Area(ST_Intersection(r.bbox_4326, p_geom)::geography)::real AS overlap_area_m2
     FROM history.training_runs r
     WHERE r.bbox_4326 IS NOT NULL
       AND r.bbox_4326 && p_geom
@@ -347,6 +384,22 @@ class EmitLogger:
 
 
 _ACTIVE_WORKERS = []
+
+
+class FrozenControl:
+    def __init__(self, value=None, text="", index=0, checked=False):
+        self._value, self._text, self._index, self._checked = value, text, index, checked
+    def value(self): return self._value
+    def text(self): return self._text
+    def currentText(self): return self._text
+    def currentIndex(self): return self._index
+    def isChecked(self): return self._checked
+    @classmethod
+    def capture(cls, widget):
+        return cls(widget.value() if hasattr(widget, "value") else None,
+                   widget.text() if hasattr(widget, "text") else (widget.currentText() if hasattr(widget, "currentText") else ""),
+                   widget.currentIndex() if hasattr(widget, "currentIndex") else 0,
+                   widget.isChecked() if hasattr(widget, "isChecked") else False)
 
 
 class WorkerThread(QThread):
@@ -416,6 +469,20 @@ class WorkerThread(QThread):
                 _ACTIVE_WORKERS.remove(self)
             except ValueError:
                 pass
+
+
+
+# PATCHED_CRS_UI: вертикальные системы высот (для России)
+VERTICAL_CRS_LIST = [
+    ("none",             "Без вертикальной СК (эллипсоид)"),
+    ("EPSG:5705",        "Балтийская 1977 (BSC77)"),
+    ("EPSG:5704",        "Пулково 1942 (бали. Балт.)"),
+    ("EPSG:5773",        "EGM96 geoid"),
+    ("EPSG:3855",        "EGM2008 geoid"),
+    ("EPSG:4979",        "WGS84 3D (эллипс.)"),
+    ("EPSG:5774",        "Балт. 1977 (высоты над уровнем моря)"),
+    ("local",            "Локальная (условная)"),
+]
 
 
 # ============================================================================
@@ -709,7 +776,7 @@ class PointCloudLoader:
             classification = np.array(las.classification)
         return {"points": points, "colors": colors, "intensity": intensity,
                 "classification": classification, "source": str(path),
-                "format": ".las"}
+                "format": path.suffix.lower(), "las_data": las, "point_ids": np.arange(len(las.points))}
 
     @staticmethod
     def _load_xyz(path):
@@ -772,6 +839,19 @@ class PointCloudLoader:
             o3d.io.write_point_cloud(str(output_path), pcd)
         elif fmt in (".las", ".laz"):
             import laspy
+            if data.get("las_data") is not None:
+                import copy
+                original = data["las_data"]
+                ids = np.asarray(data.get("point_ids", np.arange(len(original.points))), dtype=np.int64)
+                if len(ids) != len(points):
+                    raise ValueError("После отбора LAS нужны исходные point_ids; отказ от потери атрибутов")
+                las = laspy.LasData(copy.deepcopy(original.header), points=original.points[ids].copy())
+                las.evlrs = copy.deepcopy(original.evlrs)
+                las.x, las.y, las.z = np.asarray(points).T
+                if data.get("classification") is not None:
+                    las.classification = data["classification"]
+                las.write(str(output_path))
+                return
             header = laspy.LasHeader(point_format=3, version="1.4")
             header.offsets = points.min(axis=0)
             header.scales = np.array([0.001, 0.001, 0.001])
@@ -983,390 +1063,32 @@ class RealTrainer:
     def train_m1(self, pointcloud_path, output_dir,
                  ransac_threshold=0.05, primitive="Плоскость",
                  classifier_classes=None, emit_progress=None):
-        """M1 v2: семантическая сегментация облака.
-
-        Пайплайн:
-          1. Загрузка облака, оценка нормалей.
-          2. Извлечение ЗЕМЛИ:
-             • итеративный RANSAC (num_iterations адаптивно к N точек),
-               фильтр по |nz| ≥ 0.85, пока не соберём ≥ 40 % точек
-               или 8 итераций;
-             • если земля не выделилась (например, вертикальная
-               стенка) — fallback: 5-й перцентиль Z.
-          3. Негоризонтальные точки классифицируем по нормали:
-             • |nz| ≥ 0.85 → крыша (roof)
-             • |nz| ≤ 0.35 → стена (wall)
-             • иначе        → скат (slope)
-          4. Region growing по нормалям:
-             • крыши  → плоскости крыш roof_plane_1..N
-             • стены  → плоскости стен wall_plane_1..M
-          5. Кластеризация «крыша+стена» по XY (DBSCAN, eps≈1.5 м)
-             → здания building_1..K.
-          6. Сохранение:
-             • m1_classified.ply  — цветное облако по классам
-             • m1_planes.json     — плоскости (центроид, нормаль, площадь)
-             • m1_buildings.json  — здания (bbox, число плоскостей)
-             • m1_report.txt      — человекочитаемый отчёт
-        """
-        import time as _time
-        self.log.log(f"M1: {pointcloud_path}", "INFO")
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        def _p(pct, note=""):
-            if emit_progress:
-                try:
-                    emit_progress(pct, note)
-                except TypeError:
-                    emit_progress(pct)
-            self.log.log(f"M1 [{pct}%] {note}", "INFO")
-
+        from city3d_backend.core import VALID_CLASSES
+        from city3d_backend.runner import PipelineRunner, Task
+        from city3d_backend.database import LocalJournal, Repository
+        options = dict(getattr(self, "_m1_options", {}))
+        options.setdefault("scanning_type", getattr(self, "_scanning_type", "unknown"))
+        if classifier_classes:
+            options["allowed_classes"] = tuple(c["code"] for c in classifier_classes if c["code"] in VALID_CLASSES)
         try:
-            from sklearn.cluster import DBSCAN
-        except ImportError:
-            self.log.log("M1: scikit-learn не установлен", "ERROR")
-            return False
-
-        try:
-            t0 = _time.time()
-            _p(2, "Загрузка облака…")
-            pcd = o3d.io.read_point_cloud(str(pointcloud_path))
-            n_total = len(pcd.points)
-            if n_total == 0:
-                self.log.log("M1: облако пустое", "ERROR")
+            task = Task("M1", "m1.cpu", inputs={"asset": str(pointcloud_path)}, params={"config": options})
+            journal = LocalJournal(Path(output_dir) / "outbox.sqlite")
+            db_settings = {"database": dict(DB_PARAMS)}
+            runner = PipelineRunner(journal=journal, repository=Repository(db_settings))
+            result = runner.run([task], output_dir,
+                cancel=lambda: QThread.currentThread().isInterruptionRequested(),
+                progress=emit_progress, spatial=getattr(self, "_spatial_snapshot", {}))
+            self._cancelled = result["status"] == "cancelled"
+            self._last_quality = None
+            if result["status"] != "success":
+                self.log.log("M1: " + json.dumps(result["steps"], ensure_ascii=False), "ERROR")
                 return False
-            # --- 0. VOXEL DOWNSAMPLING (SLAM-style) ----------------------
-            # Уменьшает плотность и убирает шум, ускоряет RANSAC в 5–10 раз.
-            # 35M ALS-точек → ~3M точек при voxel=0.15 м.
-            scan_t = getattr(self, "_scanning_type", "unknown")
-            voxel_map = {
-                "ALS_manned": 0.25, "ALS_uav": 0.20, "MLS": 0.10,
-                "TLS": 0.05, "handheld": 0.03, "stationary": 0.02,
-            }
-            voxel_size = voxel_map.get(scan_t, 0.15)
-            _p(6, f"Voxel downsampling {voxel_size} м...")
-            _n_before = len(pcd.points)
-            pcd = pcd.voxel_down_sample(voxel_size=voxel_size)
-            n_total = len(pcd.points)
-            self.log.log(
-                f"M1: voxel {voxel_size} м -> {n_total:,} точек "
-                f"(было {_n_before:,}, "
-                f"-{100 * (1 - n_total / _n_before):.0f}%)",
-                "SUCCESS")
-
-            self.log.log(f"M1: точек: {n_total:,}", "INFO")
-
-            # --- 1. Нормали ------------------------------------------------
-            _p(8, "Оценка нормалей…")
-            # ВАЖНО: нормали считаем на ПОЛНОМ облаке. Раньше была
-            # «оптимизация» — считать по подвыборке 2 млн, но это
-            # ломало broadcast: nz имел длину 2M, а ground_mask — 35M.
-            # Open3D KDTree справляется с 35M точек за 1–3 мин.
-            pcd.estimate_normals(
-                search_param=o3d.geometry.KDTreeSearchParamHybrid(
-                    radius=max(0.5, float(ransac_threshold) * 20),
-                    max_nn=30))
-            pcd.orient_normals_to_align_with_direction(
-                orientation_reference=np.array([0.0, 0.0, 1.0]))
-
-            pts = np.asarray(pcd.points)
-            nrm = np.asarray(pcd.normals)
-            nz = np.abs(nrm[:, 2])
-
-            # --- 2. Земля --------------------------------------------------
-            _p(18, "Извлечение земли…")
-            # 2a. Быстрый приближённый отбор: Z < p5 + 0.4·(p95-p5)
-            z = pts[:, 2]
-            z_lo = np.percentile(z, 5)
-            z_hi = np.percentile(z, 95)
-            ground_mask = z < (z_lo + 0.15 * max(0.1, z_hi - z_lo))
-            # 2b. RANSAC-уточнение по горизонтальным нормалям
-            ground_refined = ground_mask.copy()
-            ground_planes = []
-            remaining = pcd.select_by_index(
-                np.where(ground_mask)[0], invert=False)
-            for k in range(6):
-                if len(remaining.points) < 5000:
-                    break
-                try:
-                    model, inliers = remaining.segment_plane(
-                        distance_threshold=float(ransac_threshold) * 2,
-                        ransac_n=3, num_iterations=500)
-                except Exception as e:
-                    self.log.log(f"M1: RANSAC-земля {k+1}: {e}", "WARNING")
-                    break
-                if len(inliers) < 5000:
-                    break
-                a, b, c, d = model
-                nn = np.array([a, b, c])
-                nn = nn / (np.linalg.norm(nn) + 1e-12)
-                if abs(nn[2]) < 0.9:
-                    # не горизонтальная — прекращаем сбор земли
-                    break
-                ground_planes.append({
-                    "model": [float(x) for x in model],
-                    "n_inliers": int(len(inliers))})
-                remaining = remaining.select_by_index(inliers, invert=True)
-            n_ground = int(ground_mask.sum())
-            self.log.log(
-                f"M1: земля ≈ {n_ground:,} ({n_ground/n_total*100:.1f}%)",
-                "SUCCESS")
-
-            # --- 3. Классификация по нормалям ------------------------------
-            _p(35, "Классификация по ориентации нормалей…")
-            roof_mask = (nz >= 0.85) & (~ground_mask)
-            wall_mask = (nz <= 0.35)
-            slope_mask = (~ground_mask) & (~roof_mask) & (~wall_mask)
-            self.log.log(
-                f"M1: кандидаты  крыши={int(roof_mask.sum()):,}  "
-                f"стены={int(wall_mask.sum()):,}  "
-                f"скаты={int(slope_mask.sum()):,}", "INFO")
-
-            # --- 4. Region growing по плоскостям ---------------------------
-            _p(48, "Сегментация плоскостей крыш…")
-            roof_planes = self._segment_planes(
-                pts, nrm, roof_mask,
-                ransac_threshold, max_planes=40)
-            _p(62, "Сегментация плоскостей стен…")
-            wall_planes = self._segment_planes(
-                pts, nrm, wall_mask,
-                ransac_threshold, max_planes=80)
-
-            # --- 5. Кластеризация зданий (по ТОЧКАМ, не по центроидам) -----
-            # Строим граф связи плоскостей: крыша+стены одного дома
-            # пересекаются по XY-проекции. Используем point-based clustering.
-            _p(75, "Кластеризация зданий (DBSCAN по крышам)…")
-            building_clusters = []
-            if roof_planes:
-                # 1. Центроиды XY крыш
-                roof_c = np.array([p["centroid"][:2] for p in roof_planes])
-                # 2. DBSCAN: eps=15 м — крыши одного дома ближе 15 м.
-                #    min_samples=1 — даже одна крыша = здание.
-                if len(roof_c) >= 1:
-                    from sklearn.cluster import DBSCAN as _DB
-                    roof_labels = _DB(eps=15.0, min_samples=1).fit_predict(
-                        roof_c)
-                else:
-                    roof_labels = np.array([])
-                n_bld = len(set(roof_labels)) if len(roof_labels) else 0
-                self.log.log(
-                    f"M1: DBSCAN по крышам → {n_bld} кластеров",
-                    "INFO")
-                # 3. Для каждой крыши — её точки и XY bbox
-                all_roof_pts = np.concatenate(
-                    [roof_planes[k]["indices"]
-                     for k in range(len(roof_planes))])
-                for lb in sorted(set(roof_labels)):
-                    if lb == -1:
-                        continue
-                    members = np.where(roof_labels == lb)[0]
-                    member_roofs = [roof_planes[k] for k in members]
-                    # Все точки крыш кластера
-                    roof_idx = np.concatenate(
-                        [r["indices"] for r in member_roofs])
-                    rp = pts[roof_idx]
-                    rxy = rp[:, :2]
-                    xmin, ymin = rxy.min(axis=0)
-                    xmax, ymax = rxy.max(axis=0)
-                    # 4. Привязка стен: стена принадлежит зданию, если её
-                    #    центроид попадает в расширенный bbox крыш (+3 м)
-                    MARGIN = 3.0
-                    attached_walls = []
-                    for wi, wl in enumerate(wall_planes):
-                        cx, cy = wl["centroid"][:2]
-                        if (xmin - MARGIN <= cx <= xmax + MARGIN and
-                                ymin - MARGIN <= cy <= ymax + MARGIN):
-                            attached_walls.append(wi)
-                    wall_idx = (np.concatenate(
-                        [wall_planes[wi]["indices"]
-                         for wi in attached_walls])
-                        if attached_walls
-                        else np.array([], dtype=np.int64))
-                    all_idx = np.concatenate([roof_idx, wall_idx]) \
-                        if len(wall_idx) else roof_idx
-                    cp = pts[all_idx]
-                    cxy = cp[:, :2]
-                    cxyz = cp
-                    h = float(cxyz[:, 2].max() - cxyz[:, 2].min())
-                    a = float((cxy[:, 0].max() - cxy[:, 0].min()) *
-                              (cxy[:, 1].max() - cxy[:, 1].min()))
-                    building_clusters.append({
-                        "building_id": int(len(building_clusters) + 1),
-                        "n_planes": int(len(member_roofs) +
-                                        len(attached_walls)),
-                        "n_roof_planes": int(len(member_roofs)),
-                        "n_wall_planes": int(len(attached_walls)),
-                        "n_points": int(len(all_idx)),
-                        "bbox_xy": [float(xmin), float(ymin),
-                                    float(xmax), float(ymax)],
-                        "z_range": [float(cxyz[:, 2].min()),
-                                    float(cxyz[:, 2].max())],
-                        "height_m": h,
-                        "area_m2": a,
-                    })
-            self.log.log(
-                f"M1: зданий после кластеризации: "
-                f"{len(building_clusters)}", "SUCCESS")
-
-            _p(85, "Сохранение результатов…")
-            n_roof_pts = sum(p["n_inliers"] for p in roof_planes)
-            n_wall_pts = sum(p["n_inliers"] for p in wall_planes)
-            n_ground_pts = int(ground_mask.sum())
-            # Нормированная оценка качества: покрытие значимыми классами
-            covered = (n_ground_pts + n_roof_pts + n_wall_pts)
-            quality = float(min(1.0, covered / n_total)) \
-                if n_total > 0 else 0.0
-
-            # 6a. Классифицированное облако (цвет = класс)
-            colors = np.zeros((n_total, 3), dtype=np.float64)
-            colors[:, :] = (0.7, 0.7, 0.7)          # прочее — серый
-            colors[ground_mask] = (0.55, 0.27, 0.07)  # земля — коричневый
-            # закрасим точки по плоскостям (крыши — красные, стены — синие)
-            roof_ids = np.zeros(n_total, dtype=bool)
-            wall_ids = np.zeros(n_total, dtype=bool)
-            for pl in roof_planes:
-                roof_ids[pl["indices"]] = True
-            for pl in wall_planes:
-                wall_ids[pl["indices"]] = True
-            colors[roof_ids] = (0.85, 0.15, 0.15)
-            colors[wall_ids] = (0.15, 0.35, 0.9)
-            colors[slope_mask] = (0.5, 0.6, 0.2)
-            out_pcd = o3d.geometry.PointCloud()
-            out_pcd.points = o3d.utility.Vector3dVector(pts)
-            out_pcd.colors = o3d.utility.Vector3dVector(colors)
-            # LAS 1.4 classification как scalar field для CloudCompare/GIS
-            labels_las14 = np.ones(n_total, dtype=np.uint8)  # 1=unclassified
-            labels_las14[ground_mask & (~roof_ids) & (~wall_ids)] = 2  # 2=ground
-            labels_las14[roof_ids]   = 6                     # 6=building
-            labels_las14[wall_ids]   = 6                     # стены → 6
-            labels_las14[slope_mask] = 5                     # 5=high veg
-            out_pcd.points = o3d.utility.Vector3dVector(pts)
-            out_pcd.colors = o3d.utility.Vector3dVector(colors)
-            # Сохраняем как PLY с classification
-            classified_path = output_dir / "m1_classified.ply"
-            o3d.io.write_point_cloud(str(classified_path), out_pcd)
-            # Дополнительно — LAS 1.4 с classification
-            try:
-                import laspy
-                header = laspy.LasHeader(point_format=7, version="1.4")
-                header.offsets = pts.min(axis=0)
-                header.scales = np.array([0.001, 0.001, 0.001])
-                las = laspy.LasData(header)
-                las.x = pts[:, 0]; las.y = pts[:, 1]; las.z = pts[:, 2]
-                las.red   = (colors[:, 0] * 65535).astype(np.uint16)
-                las.green = (colors[:, 1] * 65535).astype(np.uint16)
-                las.blue  = (colors[:, 2] * 65535).astype(np.uint16)
-                las.classification = labels_las14
-                las.write(str(output_dir / "m1_classified.las"))
-                self.log.log(
-                    f"M1: LAS 1.4 с classification → "
-                    f"m1_classified.las", "SUCCESS")
-            except Exception as _e:
-                self.log.log(f"M1: LAS не создан ({_e})", "WARNING")
-
-            # 6b. JSON по плоскостям — с РЕАЛЬНОЙ геометрией (convex hull)
-            def _plane_to_dict(pl, kind):
-                pl_pts = pts[pl["indices"]]
-                uxy = pl_pts[:, :2]
-                d = {k: v for k, v in pl.items() if k != "indices"}
-                d["kind"] = kind
-                d["xy_extent"] = [float(uxy[:,0].min()),
-                                  float(uxy[:,1].min()),
-                                  float(uxy[:,0].max()),
-                                  float(uxy[:,1].max())]
-                try:
-                    from scipy.spatial import ConvexHull
-                    if len(uxy) >= 3:
-                        h = ConvexHull(uxy)
-                        d["hull_xy"] = [[float(uxy[i,0]), float(uxy[i,1])]
-                                        for i in h.vertices]
-                except Exception:
-                    pass
-                return d
-
-            planes_path = output_dir / "m1_planes.json"
-            planes_path.write_text(json.dumps({
-                "method": "M1_semantic_v3",
-                "source": str(pointcloud_path),
-                "timestamp": datetime.now().isoformat(),
-                "n_points": int(n_total),
-                "voxel_size_m": float(voxel_size),
-                "ground": {
-                    "n_points": int(n_ground_pts),
-                    "n_planes_ransac": len(ground_planes),
-                },
-                "roof_planes": [_plane_to_dict(pl, "roof")
-                                for pl in roof_planes],
-                "wall_planes": [_plane_to_dict(pl, "wall")
-                                for pl in wall_planes],
-            }, ensure_ascii=False, indent=2))
-
-            # 6c. JSON по зданиям
-            buildings_path = output_dir / "m1_buildings.json"
-            buildings_path.write_text(json.dumps({
-                "n_buildings": len(building_clusters),
-                "buildings": building_clusters,
-            }, ensure_ascii=False, indent=2))
-
-            # 6d. Человекочитаемый отчёт
-            dt = _time.time() - t0
-            report_lines = [
-                "=" * 70,
-                "ОТЧЁТ M1 — семантическая сегментация",
-                "=" * 70,
-                f"Источник         : {pointcloud_path}",
-                f"Всего точек      : {n_total:,}",
-                f"Время            : {dt:.1f} с",
-                "",
-                f"ЗЕМЛЯ            : {n_ground_pts:,}  "
-                f"({n_ground_pts/n_total*100:.1f}%)",
-                f"КРЫШИ (плоскостей): {len(roof_planes)}  "
-                f"({n_roof_pts:,} точек)",
-                f"СТЕНЫ (плоскостей): {len(wall_planes)}  "
-                f"({n_wall_pts:,} точек)",
-                f"СКАТЫ/прочее     : {int(slope_mask.sum()):,}",
-                f"ЗДАНИЙ (кластеров): {len(building_clusters)}",
-                "",
-                f"ОЦЕНКА КАЧЕСТВА  : {quality:.3f}  (0..1)",
-                "",
-                "ЧТО ДАЛЬШЕ:",
-                "  1. Откройте m1_classified.ply — там точки окрашены",
-                "     по классам: коричневые — земля, красные — крыши,",
-                "     синие — стены, зелёные — скаты, серые — прочее.",
-                "  2. Проверьте m1_planes.json — там каждая найденная",
-                "     плоскость с нормалью и площадью.",
-                "  3. m1_buildings.json — предварительные контуры зданий.",
-                "  4. Если зданий слишком мало/много — подкрутите",
-                "     RANSAC threshold или запустите M3 (U-Net) для",
-                "     уточнения классов растительности и дорог.",
-                "",
-                "ФАЙЛЫ:",
-                f"  • {classified_path}",
-                f"  • {planes_path}",
-                f"  • {buildings_path}",
-            ]
-            report_path = output_dir / "m1_report.txt"
-            report_path.write_text("\n".join(report_lines),
-                                   encoding="utf-8")
-            self.log.log("M1: " + "-" * 50, "INFO")
-            for line in report_lines:
-                self.log.log(line, "INFO")
-            self.log.log("M1: " + "-" * 50, "INFO")
-
-            _p(100, f"готово: крыш {len(roof_planes)}, "
-                    f"стен {len(wall_planes)}, "
-                    f"зданий {len(building_clusters)}")
-            self.log.log(f"M1: результат: {classified_path}", "SUCCESS")
-            self.log.log(f"M1: отчёт: {report_path}", "SUCCESS")
-            self._last_quality = quality
+            self.log.log("M1: LAS сохранён, статус регистрации БД: " + result["db_registration"], "SUCCESS")
             return True
         except Exception as e:
-            import traceback
-            self.log.log(f"M1: ошибка: {e}", "ERROR")
-            self.log.log(traceback.format_exc(), "ERROR")
+            self.log.log(f"M1: {e}", "ERROR")
             return False
 
-    # --- вспомогательный метод: region growing по плоскостям -----------
     def _segment_planes(self, pts, nrm, mask, threshold, max_planes=40):
         """Жадная сегментация точек mask в плоскости через RANSAC.
 
@@ -1403,7 +1125,8 @@ class RealTrainer:
             # площадь = площадь выпуклой оболочки в плоскости XY
             try:
                 from scipy.spatial import ConvexHull
-                uv = plane_pts[:, :2]
+                _, _, basis = np.linalg.svd(plane_pts - centroid, full_matrices=False)
+                uv = (plane_pts - centroid) @ basis[:2].T
                 area = (ConvexHull(uv).volume
                         if len(uv) >= 3 else 0.0)
             except Exception:
@@ -1423,10 +1146,10 @@ class RealTrainer:
         n = len(pts)
         if n < 3:
             raise ValueError("too few points")
+        rng = np.random.default_rng(42)
         best_count = 0
         best_model = None
         best_inl = None
-        rng = np.random.default_rng(0)
         for _ in range(num_iter):
             i = rng.choice(n, 3, replace=False)
             p0, p1, p2 = pts[i]
@@ -1446,25 +1169,78 @@ class RealTrainer:
                 best_inl = inl
         if best_model is None:
             raise ValueError("RANSAC failed")
+        center = pts[best_inl].mean(axis=0)
+        _, _, basis = np.linalg.svd(pts[best_inl] - center, full_matrices=False)
+        normal = basis[-1]
+        best_model = (*normal, -float(normal @ center))
+        best_inl = np.flatnonzero(np.abs((pts-center) @ normal) < threshold)
         return best_model, best_inl
 
+    def train_m2(self, raster_path, output_dir):
+        from city3d_backend.runner import PipelineRunner, Task
+        options=dict(getattr(self,"_m2_snapshot",{}));model_id=options.get("model_id","yolov8n")
+        executor={"yolov8n":"yolo.detect","yoloworld_s":"yolo.world"}.get(model_id,model_id)
+        try:
+            result=PipelineRunner().run([Task("M2",executor,inputs={"asset":str(raster_path)},params=options)],output_dir,
+                cancel=lambda:QThread.currentThread().isInterruptionRequested())
+            if result["status"]!="success":self.log.log(str(result["steps"]),"ERROR")
+            return result["status"]=="success"
+        except Exception as e:
+            self.log.log(str(e),"ERROR")
+            return False
 
-# ============================================================================
-# STEP 6 — Адаптеры семантических моделей
-# ============================================================================
+    def train_m3(self, masks_dir, output_dir, n_classes=11, epochs=10):
+        from city3d_backend.runner import PipelineRunner, Task
+        try:
+            params={"epochs":epochs}
+            if getattr(self,"_m3_parent",None):params["parent"]=self._m3_parent
+            result=PipelineRunner().run([Task("M3","m3.train","train",inputs={"dataset":str(masks_dir)},params=params)],output_dir,
+                cancel=lambda:QThread.currentThread().isInterruptionRequested(),progress=getattr(self,"_m3_progress",None))
+            self._cancelled=result["status"]=="cancelled"
+            if result["status"]!="success":self.log.log(str(result["steps"]),"ERROR")
+            return result["status"]=="success"
+        except Exception as e:
+            self.log.log(str(e),"ERROR")
+            return False
 
-SEMANTIC_COLORS = {
-    0:  (0.55, 0.27, 0.07),   # ground — коричневый
-    1:  (0.85, 0.15, 0.15),   # building — красный
-    2:  (0.30, 0.30, 0.30),   # road — тёмно-серый
-    3:  (0.20, 0.70, 0.20),   # vegetation — зелёный
-    4:  (0.90, 0.80, 0.10),   # pole — жёлтый
-    5:  (0.90, 0.50, 0.10),   # fence — оранжевый
-    6:  (0.10, 0.30, 0.90),   # water — синий
-    7:  (0.60, 0.20, 0.80),   # rail — фиолетовый
-    8:  (0.20, 0.80, 0.90),   # car — голубой
-    9:  (0.80, 0.80, 0.80),   # прочее — серый
-}
+    def train_m4(self, dem_path, output_dir):
+        from city3d_backend.runner import PipelineRunner, Task
+        try:
+            result = PipelineRunner().run([Task("M4", "m4.features", inputs={"asset":str(dem_path)},
+                 params={"units":"metres"})], output_dir,
+                 cancel=lambda: QThread.currentThread().isInterruptionRequested())
+            if result["status"] != "success":
+                self.log.log(str(result["steps"]), "ERROR")
+            return result["status"] == "success"
+        except Exception as e:
+            self.log.log(str(e), "ERROR")
+            return False
+
+    def train_m5(self, classified_las, output_dir):
+        from city3d_backend.runner import PipelineRunner, Task
+        try:
+            result = PipelineRunner().run([Task("M5", "m5.qa", mode="evaluate",
+                inputs={"asset":str(classified_las)})], output_dir,
+                cancel=lambda: QThread.currentThread().isInterruptionRequested())
+            return result["status"] == "success"
+        except Exception as e:
+            self.log.log(str(e), "ERROR")
+            return False
+
+    def train_m6(self, gis_path, output_dir):
+        from city3d_backend.runner import PipelineRunner, Task
+        try:
+            result = PipelineRunner().run([Task("M6", "m6.vector", inputs={"asset":str(gis_path)})], output_dir,
+                cancel=lambda: QThread.currentThread().isInterruptionRequested())
+            if result["status"] != "success":self.log.log(str(result["steps"]), "ERROR")
+            return result["status"] == "success"
+        except Exception as e:
+            self.log.log(str(e), "ERROR")
+            return False
+
+    def train_combined(self, methods, weights, paths, output_dir):
+        self.log.log("Совместное semantic fusion не реализовано. Выполните методы отдельно; JSON весов не является обучением.", "ERROR")
+        return False
 
 
 class SemanticModelAdapter:
@@ -1565,82 +1341,7 @@ class SemanticModelAdapter:
         colors: (N, 3) float32 в [0, 1] или None
         Возвращает: labels (N,) int, confidence (N,) float
         """
-        import torch
-        import numpy as np
-        from torch_pointcloud.utils.data import collate
-
-        if self.model is None:
-            if not self.load():
-                return None, None
-
-        N = len(points)
-        labels = np.full(N, -1, dtype=np.int64)
-        confidence = np.zeros(N, dtype=np.float32)
-
-        # Границы сцены
-        xmin, ymin = points[:, 0].min(), points[:, 1].min()
-        xmax, ymax = points[:, 0].max(), points[:, 1].max()
-
-        blocks = []
-        x = xmin
-        while x < xmax:
-            y = ymin
-            while y < ymax:
-                blocks.append((x, y))
-                y += block_size - overlap
-            x += block_size - overlap
-
-        n_blocks = len(blocks)
-        if self.log:
-            self.log.log(
-                f"Инференс: {N:,} точек, {n_blocks} блоков "
-                f"({block_size}×{block_size} м)", "INFO")
-
-        for bi, (bx, by) in enumerate(blocks):
-            mask = ((points[:, 0] >= bx) &
-                    (points[:, 0] < bx + block_size) &
-                    (points[:, 1] >= by) &
-                    (points[:, 1] < by + block_size))
-            idx = np.where(mask)[0]
-            if len(idx) < 100:
-                continue
-
-            sample = {
-                "pos": torch.from_numpy(
-                    points[idx].astype(np.float32)),
-                "segment": torch.zeros(len(idx), dtype=torch.long),
-            }
-            if colors is not None:
-                sample["color"] = torch.from_numpy(
-                    colors[idx].astype(np.float32) * 255.0)
-            if self.cfg["input_channels"] >= 6:
-                sample["normal"] = torch.zeros(
-                    len(idx), 3, dtype=torch.float32)
-
-            try:
-                data = self.info["transform"](sample)
-                data = collate([data])
-                if torch.cuda.is_available():
-                    data = {k: v.cuda() if hasattr(v, "cuda") else v
-                            for k, v in data.items()}
-                with torch.no_grad():
-                    logits = self.model(
-                        data.get("x"), data["pos"], data["batch"])
-                    probs = torch.softmax(logits, dim=-1)
-                    pred = probs.argmax(dim=-1).cpu().numpy()
-                    conf = probs.max(dim=-1).values.cpu().numpy()
-                labels[idx] = pred
-                confidence[idx] = conf
-            except Exception as e:
-                if self.log:
-                    self.log.log(
-                        f"Блок {bi+1}/{n_blocks}: {e}", "WARNING")
-
-            if emit_progress:
-                pct = int(100 * (bi + 1) / n_blocks)
-                emit_progress(pct, f"блок {bi+1}/{n_blocks}")
-
-        return labels, confidence
+        raise RuntimeError("Neural backend требует проверенного outdoor checkpoint/config и inverse mapping. Используйте CPU M1; универсальный непроверенный adapter отключён.")
 
 
 class SemanticTrainer:
@@ -1660,7 +1361,7 @@ class SemanticTrainer:
         try:
             import open3d as o3d
             pcd = o3d.io.read_point_cloud(str(pointcloud_path))
-            points = np.asarray(pcd.points).astype(np.float32)
+            points = np.asarray(pcd.points, dtype=np.float64)
             colors = (np.asarray(pcd.colors).astype(np.float32)
                       if pcd.has_colors() else None)
             n_total = len(points)
@@ -1739,218 +1440,6 @@ class SemanticTrainer:
             return False
 
 
-    def train_m2(self, raster_path, output_dir):
-        self.log.log(f"M2: {raster_path}", "INFO")
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        if not Path(raster_path).exists():
-            self.log.log("M2: файл не найден", "ERROR")
-            return False
-        try:
-            from ultralytics import YOLO
-            model = YOLO("yolov8n.pt")
-            results = model(raster_path)
-            stats_path = output_dir / "m2_yolo_stats.json"
-            with open(stats_path, "w") as f:
-                json.dump({"model": "yolov8n",
-                           "n_boxes": (len(results[0].boxes)
-                                       if results else 0),
-                           "source": raster_path}, f, indent=2)
-            self.log.log(f"M2: YOLOv8: {stats_path}", "SUCCESS")
-            return True
-        except ImportError:
-            self.log.log("M2: YOLOv8 нет, fallback rasterio", "WARNING")
-        try:
-            import rasterio
-            with rasterio.open(raster_path) as src:
-                meta = {"width": src.width, "height": src.height,
-                        "n_bands": src.count, "crs": str(src.crs)}
-            stats_path = output_dir / "m2_raster_info.json"
-            with open(stats_path, "w") as f:
-                json.dump(meta, f, indent=2)
-            self.log.log(f"M2: базовый анализ: {stats_path}", "SUCCESS")
-            return True
-        except Exception as e:
-            self.log.log(f"M2: ошибка: {e}", "ERROR")
-            return False
-
-    def train_m3(self, masks_dir, output_dir, n_classes=11, epochs=10):
-        self.log.log(f"M3: {masks_dir}", "INFO")
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            import torch
-            import torch.nn as nn
-            self.log.log(
-                f"M3: PyTorch {torch.__version__}, "
-                f"CUDA: {torch.cuda.is_available()}", "INFO")
-
-            class SimpleSegNet(nn.Module):
-                def __init__(self, n):
-                    super().__init__()
-                    self.conv1 = nn.Conv2d(3, 32, 3, padding=1)
-                    self.conv2 = nn.Conv2d(32, n, 3, padding=1)
-
-                def forward(self, x):
-                    return self.conv2(torch.relu(self.conv1(x)))
-            model = SimpleSegNet(n_classes)
-            checkpoint_path = output_dir / "m3_unet_init.pth"
-            torch.save(model.state_dict(), checkpoint_path)
-            self.log.log(f"M3: чекпоинт: {checkpoint_path}", "SUCCESS")
-            return True
-        except ImportError:
-            self.log.log("M3: PyTorch не установлен", "ERROR")
-            return False
-
-    def train_m4(self, dem_path, output_dir):
-        self.log.log(f"M4: {dem_path}", "INFO")
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        if not Path(dem_path).exists():
-            self.log.log("M4: файл не найден", "ERROR")
-            return False
-        try:
-            import rasterio
-            from scipy import ndimage
-            with rasterio.open(dem_path) as src:
-                dem = src.read(1).astype(np.float32)
-            dy, dx = np.gradient(dem)
-            slope = np.arctan(np.sqrt(dx ** 2 + dy ** 2)) * 180 / np.pi
-            aspect = np.arctan2(-dx, dy) * 180 / np.pi
-            aspect = np.where(aspect < 0, 360 + aspect, aspect)
-            curvature = ndimage.laplace(dem)
-            mean_dem = ndimage.uniform_filter(dem, size=15)
-            tpi = dem - mean_dem
-            output_npz = output_dir / "m4_terrain_features.npz"
-            np.savez_compressed(output_npz, slope=slope, aspect=aspect,
-                                curvature=curvature, tpi=tpi, dem=dem)
-            stats = {"dem_min": float(dem.min()),
-                     "dem_max": float(dem.max()),
-                     "slope_mean": float(slope.mean()),
-                     "slope_max": float(slope.max()),
-                     "source": str(dem_path)}
-            with open(output_dir / "m4_stats.json", "w") as f:
-                json.dump(stats, f, indent=2)
-            self.log.log(
-                f"M4: уклон {slope.mean():.1f}°, "
-                f"макс. {slope.max():.1f}°", "INFO")
-            self.log.log(f"M4: результат: {output_npz}", "SUCCESS")
-            return True
-        except Exception as e:
-            self.log.log(f"M4: ошибка: {e}", "ERROR")
-            return False
-
-    def train_m5(self, classified_las, output_dir):
-        self.log.log(f"M5: {classified_las}", "INFO")
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        if not Path(classified_las).exists():
-            self.log.log("M5: файл не найден", "ERROR")
-            return False
-        try:
-            import laspy
-            las = laspy.read(classified_las)
-            if not hasattr(las, "classification"):
-                self.log.log("M5: нет classification", "ERROR")
-                return False
-            classes = np.array(las.classification)
-            unique, counts = np.unique(classes, return_counts=True)
-            asprs = {2: "ground", 3: "low_vegetation",
-                     4: "medium_vegetation", 5: "high_vegetation",
-                     6: "building", 9: "water", 10: "rail",
-                     11: "road_surface", 13: "wire_guard"}
-            stats = {}
-            for c, n in zip(unique, counts):
-                name = asprs.get(int(c), f"class_{c}")
-                stats[name] = int(n)
-                self.log.log(f"    {name}: {n:,}", "INFO")
-
-            counts_arr = np.array(list(stats.values()), dtype=np.float64)
-            if counts_arr.sum() > 0:
-                p = counts_arr / counts_arr.sum()
-                ent = -float(np.sum(p * np.log(p + 1e-12)))
-                max_ent = (float(np.log(len(counts_arr)))
-                           if len(counts_arr) > 1 else 1.0)
-                quality = ent / max_ent if max_ent > 0 else 0.0
-            else:
-                quality = 0.0
-
-            stats_path = output_dir / "m5_class_stats.json"
-            with open(stats_path, "w") as f:
-                json.dump({"n_points": len(classes),
-                           "n_classes": len(unique),
-                           "classes": stats,
-                           "quality_score": quality,
-                           "source": str(classified_las)},
-                          f, indent=2, ensure_ascii=False)
-            self.log.log(f"M5: статистика: {stats_path}", "SUCCESS")
-            return True
-        except Exception as e:
-            self.log.log(f"M5: ошибка: {e}", "ERROR")
-            return False
-
-    def train_m6(self, gis_path, output_dir):
-        self.log.log(f"M6: {gis_path}", "INFO")
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        if not Path(gis_path).exists():
-            self.log.log("M6: файл не найден", "ERROR")
-            return False
-        try:
-            import geopandas as gpd
-            gdf = gpd.read_file(gis_path)
-            geom_types = gdf.geometry.geom_type.value_counts().to_dict()
-            stats = {"format": Path(gis_path).suffix,
-                     "n_features": len(gdf),
-                     "geometry_types": geom_types,
-                     "crs": str(gdf.crs),
-                     "columns": list(gdf.columns),
-                     "source": gis_path}
-            stats_path = output_dir / "m6_gis_stats.json"
-            with open(stats_path, "w") as f:
-                json.dump(stats, f, indent=2, ensure_ascii=False)
-            self.log.log(f"M6: {len(gdf)} объектов, CRS: {gdf.crs}",
-                         "INFO")
-            self.log.log(f"M6: статистика: {stats_path}", "SUCCESS")
-            return True
-        except Exception as e:
-            self.log.log(f"M6: ошибка: {e}", "ERROR")
-            return False
-
-    def train_combined(self, methods, weights, paths, output_dir):
-        self.log.log(f"Комбинирование: {methods}", "INFO")
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        results = {}
-        for m in methods:
-            method_path = paths.get(m, "")
-            self.log.log(f"--- Запуск {m} ---", "INFO")
-            if m == "M1":
-                ok = self.train_m1(method_path, output_dir)
-            elif m == "M2":
-                ok = self.train_m2(method_path, output_dir)
-            elif m == "M3":
-                ok = self.train_m3(method_path, output_dir)
-            elif m == "M4":
-                ok = self.train_m4(method_path, output_dir)
-            elif m == "M5":
-                ok = self.train_m5(method_path, output_dir)
-            elif m == "M6":
-                ok = self.train_m6(method_path, output_dir)
-            else:
-                ok = False
-            results[m] = {"success": ok,
-                          "weight": weights.get(m, 1.0),
-                          "path": method_path}
-        agg_path = output_dir / "combined_training_summary.json"
-        with open(agg_path, "w") as f:
-            json.dump({"methods": methods, "weights": weights,
-                       "results": results,
-                       "timestamp": datetime.now().isoformat()},
-                      f, indent=2, ensure_ascii=False)
-        self.log.log(f"Комбинирование: {agg_path}", "SUCCESS")
-        return True
-
 
 class FormatExporter:
     def __init__(self, workspace):
@@ -1972,50 +1461,25 @@ class FormatExporter:
         return {"ok": bool(ok), "path": str(path), "error": err}
 
     def export_to_citygml(self, input_path, output_path, bbox=None):
-        if not self._check_tool("3dfier"):
-            return self._result(False, output_path,
-                "Утилита '3dfier' не найдена в PATH.")
-        extent_line = ""
-        if bbox:
-            extent_line = (f"  extent: [{bbox[0]}, {bbox[1]}, "
-                           f"{bbox[3]}, {bbox[4]}]")
-        config = f"""input:
-  pointcloud: {input_path}
-{extent_line}
-
-output:
-  format: CityGML
-  epsg: 4326
-
-lifting:
-  building:
-    height: 10.0
-    min_area: 10.0
-  terrain:
-    true: true
-"""
-        cfg = self.workspace / "3dfier_config.yml"
-        cfg.write_text(config)
-        r = subprocess.run(
-            ["3dfier", str(cfg), "--output", str(output_path)],
-            capture_output=True, text=True)
-        if r.returncode != 0:
-            return self._result(False, output_path,
-                f"3dfier вернул код {r.returncode}: "
-                f"{r.stderr.strip()[:300]}")
-        if not self._ok(output_path):
-            return self._result(False, output_path,
-                "3dfier отработал, но файл CityGML не создан.")
-        return self._result(True, output_path)
+        return self._result(False, output_path, "CityGML требует подтверждённых объектных геометрий/LOD и CRS; LAS-классификация не является восстановленными зданиями")
 
     def export_to_usd(self, input_path, output_path):
+        try:
+            from city3d_backend.runner import verify_snapshot_member
+            verify_snapshot_member(input_path)
+        except Exception as e:
+            return self._result(False, output_path, str(e))
         try:
             from pxr import Usd, UsdGeom, Gf
         except ImportError as e:
             return self._result(False, output_path,
                 f"Библиотека pxr (OpenUSD) не установлена: {e}")
         try:
-            pcd = o3d.io.read_point_cloud(str(input_path))
+            loaded = PointCloudLoader.load(input_path)
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(loaded["points"])
+            if loaded.get("colors") is not None:
+                pcd.colors = o3d.utility.Vector3dVector(loaded["colors"])
             points = np.asarray(pcd.points)
             if len(points) == 0:
                 return self._result(False, output_path,
@@ -2023,8 +1487,12 @@ lifting:
             stage = Usd.Stage.CreateNew(str(output_path))
             xform = UsdGeom.Xform.Define(stage, '/World')
             stage.SetDefaultPrim(xform.GetPrim())
+            UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+            UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+            origin = points.min(axis=0)
+            xform.AddTranslateOp().Set(Gf.Vec3d(*origin))
             pp = UsdGeom.Points.Define(stage, '/World/PointCloud')
-            pp.GetPointsAttr().Set([Gf.Vec3f(*p) for p in points])
+            pp.GetPointsAttr().Set([Gf.Vec3f(*p) for p in (points-origin)])
             stage.Save()
             if not self._ok(output_path):
                 return self._result(False, output_path,
@@ -2035,7 +1503,16 @@ lifting:
 
     def export_to_obj(self, input_path, output_path):
         try:
-            pcd = o3d.io.read_point_cloud(str(input_path))
+            from city3d_backend.runner import verify_snapshot_member
+            verify_snapshot_member(input_path)
+        except Exception as e:
+            return self._result(False, output_path, str(e))
+        try:
+            loaded = PointCloudLoader.load(input_path)
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(loaded["points"])
+            if loaded.get("colors") is not None:
+                pcd.colors = o3d.utility.Vector3dVector(loaded["colors"])
             if len(pcd.points) < 4:
                 return self._result(False, output_path,
                     "Точек меньше 4 — нельзя построить меш.")
@@ -2050,6 +1527,11 @@ lifting:
             return self._result(False, output_path, str(e))
 
     def export_to_geojson(self, input_path, output_path, bbox=None):
+        try:
+            from city3d_backend.runner import verify_snapshot_member
+            verify_snapshot_member(input_path)
+        except Exception as e:
+            return self._result(False, output_path, str(e))
         if not self._check_tool("ogr2ogr"):
             return self._result(False, output_path,
                 "Утилита 'ogr2ogr' (GDAL) не найдена в PATH.")
@@ -2068,6 +1550,11 @@ lifting:
         return self._result(True, output_path)
 
     def export_to_postgis(self, input_path, db_params, table_name):
+        try:
+            from city3d_backend.runner import verify_snapshot_member
+            verify_snapshot_member(input_path)
+        except Exception as e:
+            return self._result(False, "PostGIS", str(e))
         if not self._check_tool("ogr2ogr"):
             return self._result(False, table_name,
                 "Утилита 'ogr2ogr' (GDAL) не найдена в PATH.")
@@ -2083,6 +1570,11 @@ lifting:
         return self._result(True, table_name)
 
     def export_to_dxf(self, input_path, output_path):
+        try:
+            from city3d_backend.runner import verify_snapshot_member
+            verify_snapshot_member(input_path)
+        except Exception as e:
+            return self._result(False, output_path, str(e))
         p = MODELS["3d_cad_pointcloud"]
         if not p.exists():
             return self._result(False, output_path,
@@ -2103,6 +1595,11 @@ lifting:
         return self._result(True, output_path)
 
     def export_to_ifc(self, input_path, output_path):
+        try:
+            from city3d_backend.runner import verify_snapshot_member
+            verify_snapshot_member(input_path)
+        except Exception as e:
+            return self._result(False, output_path, str(e))
         p = MODELS["Cloud2BIM"]
         if not p.exists():
             return self._result(False, output_path,
@@ -2200,8 +1697,11 @@ class DatasetPreparer:
             dst_dir = self.root / "processed" / split_name
             for f in split_files:
                 data = PointCloudLoader.load(f)
-                out = dst_dir / (f.stem + ".ply")
-                PointCloudLoader.save(data, out, ".ply")
+                if f.suffix.lower() in (".las", ".laz"):
+                    shutil.copy2(f, dst_dir / f.name)
+                else:
+                    out = dst_dir / (f.stem + ".ply")
+                    PointCloudLoader.save(data, out, ".ply")
             self.metadata["splits"][split_name] = len(split_files)
             if self.log:
                 self.log.log(
@@ -2216,28 +1716,27 @@ class DatasetPreparer:
         train_dir = self.root / "processed" / "train"
         aug_dir = self.root / "augmented"
         aug_dir.mkdir(exist_ok=True)
-        files = sorted(train_dir.glob("*.ply"))
+        files = sorted(list(train_dir.glob("*.las")) + list(train_dir.glob("*.laz")))
         count = 0
         for f in files:
             data = PointCloudLoader.load(f)
-            points = data["points"].copy()
+            points = data["points"]
             center = points.mean(axis=0)
             for i in range(rotations):
                 angle = 2 * np.pi * i / rotations
                 rot = np.array([[np.cos(angle), -np.sin(angle), 0],
-                                [np.sin(angle), np.cos(angle), 0],
-                                [0, 0, 1]])
-                rotated = (points - center) @ rot.T + center
+                                [np.sin(angle), np.cos(angle), 0], [0, 0, 1]])
+                rotated = (points-center) @ rot.T
                 if noise_std > 0:
                     rotated += rng.normal(0, noise_std, rotated.shape)
-                if dropout_ratio > 0:
-                    mask = rng.rand(len(rotated)) > dropout_ratio
-                    rotated = rotated[mask]
-                out = aug_dir / f"{f.stem}_rot{i:02d}.ply"
-                PointCloudLoader.save({
-                    "points": rotated, "colors": None,
-                    "intensity": None, "classification": None
-                }, out, ".ply")
+                mask = rng.rand(len(rotated)) >= dropout_ratio
+                payload = {"points": rotated[mask], "origin": center,
+                           "classification": data["classification"][mask], "rotation_matrix": rot, "angle_radians": angle, "seed": seed, "noise_std": noise_std, "dropout_ratio": dropout_ratio,
+                           "point_ids": np.flatnonzero(mask), "source": str(f)}
+                for name in ("colors", "intensity"):
+                    if data.get(name) is not None:
+                        payload[name] = data[name][mask]
+                np.savez_compressed(aug_dir / f"{f.stem}_rot{i:02d}.npz", **payload)
                 count += 1
         self.metadata["augmented_count"] = count
         self._save_metadata()
@@ -2322,26 +1821,21 @@ class TrainingHistoryDB:
         self._connect()
 
     def _connect(self):
+        from city3d_backend.database import identifier
+        identifier(self.schema_h); identifier(self.schema_r)
         if not HAS_PSYCOPG:
-            self._log("psycopg не установлен — история не ведётся", "WARNING")
+            self._log("psycopg не установлен", "WARNING")
             return
-        dsn = (f"dbname={self.params['dbname']} "
-               f"host={self.params['host']} port={self.params['port']} "
-               f"user={self.params['user']} password={self.params['password']}")
         try:
-            self.conn = psycopg.connect(dsn, autocommit=True)
+            from psycopg import sql
+            params={k:v for k,v in self.params.items() if k in ("dbname","host","port","user","password","service","sslmode")}
+            self.conn=psycopg.connect(**params,autocommit=True,connect_timeout=3)
             with self.conn.cursor() as cur:
-                cur.execute("SET search_path TO %s, public"
-                            % (self.schema_h,))
-            with self.conn.cursor() as cur:
-                cur.execute(DB_DDL)
-            self._log(f"Postgres подключён: {self.params['dbname']}",
-                      "SUCCESS")
+                cur.execute(sql.SQL("SET search_path TO {}, public").format(sql.Identifier(self.schema_h)))
+            self._log("Подключение к существующей PostGIS БД установлено; миграции выполняются отдельно", "SUCCESS")
         except Exception as e:
-            self.conn = None
-            self._log(f"Postgres недоступен: {e}. "
-                      f"История и справочники EPSG не будут доступны.",
-                      "WARNING")
+            self.conn=None
+            self._log("БД недоступна для этой сессии: " + type(e).__name__, "WARNING")
 
     def _log(self, msg, level="INFO"):
         if self.log:
@@ -2398,7 +1892,7 @@ class TrainingHistoryDB:
                          bbox, bbox_4326, status)
                     VALUES (%s, %s, %s, %s, %s, %s, %s,
                             %s::box3d,
-                            CASE WHEN %s IS NULL THEN NULL
+                            CASE WHEN %s::text IS NULL THEN NULL
                                  ELSE ST_GeomFromText(%s, 4326) END,
                             'running')
                     RETURNING id
@@ -2823,12 +2317,26 @@ class Mesh3DViewer(QWidget):
         self._mesh_item = None
 
     def clear(self):
+        """Полная очистка: убирает меш, сбрасывает камеру и ось.
+        PATCHED_EXPORT_UI"""
         if self._mesh_item is not None:
             try:
                 self.view.removeItem(self._mesh_item)
             except Exception:
                 pass
             self._mesh_item = None
+        # Сбрасываем вид
+        try:
+            self.view.setCameraPosition(distance=100,
+                                        elevation=30, azimuth=45)
+            self.view.update()
+        except Exception:
+            pass
+        # Сбрасываем подписи
+        try:
+            self.info_label.setText("Нет данных")
+        except Exception:
+            pass
 
     def _fit_axes(self, span):
         try:
@@ -2955,95 +2463,7 @@ class Mesh3DViewer(QWidget):
         self.view.update()
 
 
-class WebMapViewer(QWidget):
-    HTML_TEMPLATE = """<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <link rel="stylesheet"
-        href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <style>
-    html, body, #map {{ width:100%; height:100%; margin:0; padding:0;
-                        background:#1e1e1e; }}
-    .leaflet-control-attribution {{ font-size:9px; }}
-    .info {{ position:absolute; top:8px; left:50px; z-index:1000;
-             background:rgba(30,30,30,0.85); color:#4ec9b0;
-             padding:6px 10px; border-radius:4px;
-             font-family:sans-serif; font-size:12px; }}
-  </style>
-</head>
-<body>
-<div id="map"></div>
-<div class="info">{info}</div>
-<script>
-  const map = L.map('map', {{ preferCanvas: true }})
-                .setView([55.75, 37.61], 3);
-  L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',
-              {{ maxZoom: 19 }}).addTo(map);
-  const data = {geojson};
-  if (data && data.features && data.features.length) {{
-    const layer = L.geoJSON(data, {{
-      pointToLayer: (f, ll) => L.circleMarker(ll, {{
-        radius: 2, color: '#4ec9b0', fillColor: '#4ec9b0',
-        fillOpacity: 0.7, weight: 0
-      }}),
-      style: {{ color: '#4ec9b0', weight: 1, fillOpacity: 0.3 }}
-    }}).addTo(map);
-    try {{ map.fitBounds(layer.getBounds()); }} catch(e) {{}}
-  }}
-</script>
-</body>
-</html>"""
-
-    MAX_FEATURES = 50_000
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        self.browser = QWebEngineView()
-        layout.addWidget(self.browser)
-        self.last_truncated = False
-        self.last_feature_count = 0
-        self._show_placeholder()
-
-    def _show_placeholder(self):
-        html = ("<html><body style='background:#1e1e1e;color:#808080;"
-                "font-family:sans-serif;padding:30px;text-align:center'>"
-                "<h3>Выберите GeoJSON-файл для отображения на карте</h3>"
-                "</body></html>")
-        self.browser.setHtml(html)
-
-    def show_geojson(self, path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            features = data.get("features", [])
-            n_total = len(features)
-            if n_total > self.MAX_FEATURES:
-                data = {"type": "FeatureCollection",
-                        "features": features[:self.MAX_FEATURES]}
-                truncated = True
-            else:
-                truncated = False
-            payload = json.dumps(data, ensure_ascii=False)
-            info = f"Объектов: {n_total:,}"
-            if truncated:
-                info += f" (показано {self.MAX_FEATURES:,})"
-            html = self.HTML_TEMPLATE.format(geojson=payload, info=info)
-            self.browser.setHtml(html)
-            self.last_truncated = truncated
-            self.last_feature_count = n_total
-            return True
-        except Exception as e:
-            err_html = (
-                f"<html><body style='background:#1e1e1e;color:#f44747;"
-                f"font-family:monospace;padding:20px'>"
-                f"<h3>Не удалось загрузить GeoJSON</h3>"
-                f"<pre>{e}</pre></body></html>")
-            self.browser.setHtml(err_html)
-            return False
+from city3d_backend.gui_layers import OfflineMapViewer as WebMapViewer
 
 
 class ExportPreviewViewer(QWidget):
@@ -3064,7 +2484,7 @@ class ExportPreviewViewer(QWidget):
         self.stack = QStackedWidget()
         self.mesh_view = Mesh3DViewer()
 
-        if HAS_WEBENGINE:
+        if True:
             self.web_view = WebMapViewer()
         else:
             self.web_view = None
@@ -3220,18 +2640,34 @@ class LoadDataTab(QWidget):
         stg.setLayout(stl)
         tl.addWidget(stg)
 
-        cg = QGroupBox("Система координат (CRS)")
+        # PATCHED_CRS_UI: расширенный блок CRS + вертикальная СК
+        cg = QGroupBox("Система координат и высот")
         cl = QFormLayout()
         self.crs_display = QLineEdit()
         self.crs_display.setReadOnly(True)
-        cl.addRow("CRS:", self.crs_display)
+        cl.addRow("Горизонтальный CRS:", self.crs_display)
         self.crs_source = QLineEdit()
         self.crs_source.setReadOnly(True)
         cl.addRow("Источник:", self.crs_source)
-        b_pick_crs = QPushButton("Выбрать CRS вручную…")
+
+        self.vertical_crs_combo = QComboBox()
+        for code, name in VERTICAL_CRS_LIST:
+            self.vertical_crs_combo.addItem(name, code)
+        self.vertical_crs_combo.setToolTip(
+            "Вертикальная система высот (Балтийская, EGM96, эллипсоид)")
+        cl.addRow("Вертикальная СК:", self.vertical_crs_combo)
+
+        self.height_offset_spin = QDoubleSpinBox()
+        self.height_offset_spin.setRange(-10000.0, 10000.0)
+        self.height_offset_spin.setDecimals(3)
+        self.height_offset_spin.setValue(0.0)
+        self.height_offset_spin.setToolTip(
+            "Смещение высот (м), если нужно подправить Z")
+        cl.addRow("Смещение высот (м):", self.height_offset_spin)
+
+        b_pick_crs = QPushButton("Выбрать горизонтальный CRS…")
         b_pick_crs.setToolTip(
-            "Открыть справочник EPSG с поиском, автодополнением и "
-            "подсказками. Источник справочника: crslist.json")
+            "Открыть справочник EPSG с поиском")
         b_pick_crs.clicked.connect(self.open_crs_dialog)
         cl.addRow("", b_pick_crs)
         cg.setLayout(cl)
@@ -3887,7 +3323,7 @@ MODELS_TEMPLATE = {
     "comment": "Реестр локальных AI-моделей City3D. Путь к весам — "
                "относительный или абсолютный.",
     "models": [
-        {"id": "ransac", "method": "M1", "name": "RANSAC (Open3D)",
+        {"id": "ransac", "method": "M1", "name": "CPU SMRF/CSF + ExtraTrees",
          "role": "geometry", "task": "Плоскости", "kind": "classic",
          "requires": ["open3d"], "weights": None,
          "trained_on": "—", "notes": "Без обучения. Быстрый baseline."},
@@ -3897,7 +3333,7 @@ MODELS_TEMPLATE = {
          "requires": ["torch", "open3d"],
          "weights": "models/M1/randlanet_semantickitti.pth",
          "trained_on": "SemanticKITTI (19 классов)",
-         "notes": "Точность на городах высокая. Требует GPU ~6 GB."},
+         "notes": "Adapter/config/checkpoint не проверены; качество на проекте неизвестно."},
         {"id": "kpconv_s3dis", "method": "M1", "name": "KPConv (S3DIS)",
          "role": "semantic", "task": "3D-сегментация", "kind": "dl3d",
          "requires": ["torch"], "weights": "models/M1/kpconv_s3dis.pth",
@@ -3962,36 +3398,10 @@ MODELS_TEMPLATE = {
 
 
 PIPELINE_PRESETS = {
-    "P1_lod1": {
-        "name": "P1 — Быстрый LOD1",
-        "steps": ["preprocess", "M1:ransac", "M4", "fuse",
-                  "export:CityGML"],
-        "hint": "Минимум шагов. Земля + плоскости + LOD1-экструзия.",
-    },
-    "P2_lod2": {
-        "name": "P2 — Точный LOD2",
-        "steps": ["preprocess", "M5", "M1:ransac",
-                  "M3:unet_buildings", "fuse", "export:CityGML"],
-        "hint": "Требует эталонов ASPRS и маски зданий.",
-    },
-    "P3_veg": {
-        "name": "P3 — Растительность и ЛЭП",
-        "steps": ["preprocess", "M4", "M5", "M1:randla_kitti", "fuse",
-                  "export:GeoJSON"],
-        "hint": "Хорошо для ЛЭП и высоких деревьев.",
-    },
-    "P4_geoai": {
-        "name": "P4 — GeoAI по растрам",
-        "steps": ["preprocess", "M3:geoai_buildings",
-                  "export:GeoJSON"],
-        "hint": "Здания из GeoTIFF через opengeos/geoai.",
-    },
-    "P5_validate": {
-        "name": "P5 — Валидация по ГИС",
-        "steps": ["preprocess", "M1:ransac", "M6", "fuse",
-                  "export:DXF"],
-        "hint": "Требуется SXF/SHP на ту же территорию.",
-    },
+    "cpu_las": {"name":"CPU M1 → проверенный LAS", "steps":["M1:ransac", "export:LAS"], "hint":"Ground/CPU inference, без обещания LOD-реконструкции."},
+    "qa_cpu": {"name":"QA меток → CPU M1 → LAS", "steps":["M5:asprs_stat","M1:ransac","export:LAS"], "hint":"Распределение исходных меток не является accuracy."},
+    "terrain": {"name":"DEM: метрические признаки", "steps":["M4:terrain_rf"], "hint":"Slope/aspect/TPI/curvature; это признаки, не обученный RF."},
+    "vectors": {"name":"GIS: нормализация GeoJSON", "steps":["M6:gis_vector"], "hint":"Сохранение объектов и provenance; SXF требует Panorama SDK."},
 }
 
 
@@ -4155,14 +3565,16 @@ class AIModelRegistry:
 
     def __init__(self, path=None, log_widget=None):
         self.path = Path(path) if path else (
-            Path(__file__).parent / "models.json")
+            Path(_APP_SETTINGS.get("model_registry", str(Path(__file__).parent / "models.json"))))
         self.log = log_widget
         self.models = []
         self._load()
+        self.models.append({"id":"city3d_unet_cpu","method":"M3","name":"City3D CPU U-Net baseline","role":"semantic2d","task":"Raster segmentation","kind":"ml","requires":["torch","rasterio"],"weights":"M3/city3d_tiny_unet.npz","trained_on":"Собственный reviewed dataset","notes":"Новый train/infer adapter; старые чужие U-Net weights не совместимы."})
 
     def _load(self):
         if not self.path.exists():
-            self._write_template()
+            self.models = list(MODELS_TEMPLATE["models"])
+            return
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
             self.models = data.get("models", [])
@@ -4195,41 +3607,139 @@ class AIModelRegistry:
 
     @staticmethod
     def _check_module(name):
+        import importlib.util
         try:
-            __import__(name)
-            return True, ""
-        except ImportError:
-            return False, f"нет модуля '{name}'"
+            ok=importlib.util.find_spec(name) is not None
+            return ok, "" if ok else "нет модуля: " + name
+        except Exception as e:
+            return False, "ошибка проверки зависимости: " + type(e).__name__
 
     def _check_weights(self, w):
-        if not w:
-            return True, ""
-        p = Path(w).expanduser()
-        if p.is_absolute() or "/" in str(w):
-            if p.exists():
-                return True, ""
-            return False, f"нет файла '{w}'"
-        # относительное имя типа yolov8n.pt — скачивается автоматически
-        return True, "(будет скачано)"
+        if not w:return True, ""
+        root=Path(_APP_SETTINGS.get("models_root", str(PROJECTS_DIR / "city3d_models")))
+        p=Path(w).expanduser()
+        if not p.is_absolute():p=root/str(p).removeprefix("models/")
+        return p.is_file(), "" if p.is_file() else "нет локальных весов: " + str(p)
 
     def check_availability(self):
-        """Возвращает список {'model','ok','issues','requires_state'}."""
-        out = []
+        from city3d_backend.registry import inventory
+        root=_APP_SETTINGS.get("models_root",str(PROJECTS_DIR / "city3d_models"))
+        states={r["id"]:r for r in inventory(root)}
+        report=[]
         for m in self.models:
-            issues = []
-            req_state = []
-            for req in m.get("requires", []) or []:
-                ok, err = self._check_module(req)
-                req_state.append((req, ok))
-                if not ok:
-                    issues.append(err)
-            ok_w, err_w = self._check_weights(m.get("weights"))
-            if not ok_w:
-                issues.append(err_w)
-            out.append({"model": m, "ok": not issues,
-                        "issues": issues, "requires_state": req_state})
-        return out
+            state=states.get(m.get("id"),{"status":"adapter_missing","reason":"Нет проверенного adapter", "infer_enabled":False,"missing_dependencies":[]})
+            issues=[state["status"],state.get("reason","")]
+            if state.get("checkpoint") and not state.get("checkpoint_exists"):issues.append("Нет локального checkpoint")
+            report.append({"model":m,"ok":state["infer_enabled"],"issues":issues,"requires_state":[(r,r not in state["missing_dependencies"]) for r in m.get("requires",[])],"capability":state})
+        return report
 
+
+
+class PipelineContext:
+    """Единое состояние конвейера."""
+
+    def __init__(self, out_dir, log_fn=None):
+        self.out_dir = Path(out_dir)
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        self.log = log_fn or (lambda m, l="INFO": None)
+
+        self.pointcloud_path = None
+        self.m5_las_refs = []
+        self.rasters = []
+        self.dem_path = None
+        self.gis_path = None
+
+        self.step_results = []
+        self.classification = None
+        self.n_points = 0
+
+        self.crs_epsg = None
+        self.vertical_crs = None
+        self.height_offset = 0.0
+
+        self.best_classified_las = None
+        self.best_classified_ply = None
+        self.best_report = None
+
+        self.metrics_agg = {
+            "coverage_total": 0.0,
+            "n_methods_ok": 0,
+            "n_methods_total": 0,
+            "quality_by_method": {},
+        }
+
+    def register(self, idx, role, mid, ok, step_dir, extra=None):
+        rec = {"idx": idx, "role": role, "id": mid,
+               "ok": bool(ok), "out_dir": str(step_dir)}
+        if extra:
+            rec.update(extra)
+        self.step_results.append(rec)
+        self.metrics_agg["n_methods_total"] += 1
+        if ok:
+            self.metrics_agg["n_methods_ok"] += 1
+
+    def feed_classified(self, las_path, ply_path=None,
+                        report_path=None, quality=None):
+        if las_path and Path(las_path).exists():
+            self.best_classified_las = str(las_path)
+        if ply_path and Path(ply_path).exists():
+            self.best_classified_ply = str(ply_path)
+        if report_path and Path(report_path).exists():
+            self.best_report = str(report_path)
+        if quality is not None:
+            self.metrics_agg["coverage_total"] = max(
+                self.metrics_agg["coverage_total"], quality)
+
+    def export_input(self):
+        return (self.best_classified_las
+                or self.best_classified_ply
+                or self.pointcloud_path)
+
+    def save_summary(self):
+        import json as _j
+        summary = {
+            "timestamp": datetime.now().isoformat(),
+            "out_dir": str(self.out_dir),
+            "crs_epsg": self.crs_epsg,
+            "vertical_crs": self.vertical_crs,
+            "height_offset": self.height_offset,
+            "sources": {
+                "pointcloud": self.pointcloud_path,
+                "m5_las": self.m5_las_refs,
+                "rasters": self.rasters,
+                "dem": self.dem_path,
+                "gis": self.gis_path,
+            },
+            "steps": self.step_results,
+            "metrics": self.metrics_agg,
+            "best_classified_las": self.best_classified_las,
+            "export_input": self.export_input(),
+        }
+        (self.out_dir / "pipeline_summary.json").write_text(
+            _j.dumps(summary, ensure_ascii=False, indent=2,
+                     default=str),
+            encoding="utf-8")
+        lines = [
+            "=" * 70,
+            "ОТЧЁТ КОНВЕЙЕРА",
+            "=" * 70,
+            f"Папка: {self.out_dir}",
+            f"CRS: EPSG:{self.crs_epsg}  Vertical: {self.vertical_crs}",
+            f"Δ Z: {self.height_offset:.3f} м",
+            "",
+            f"Шагов: {self.metrics_agg['n_methods_total']}",
+            f"Успешно: {self.metrics_agg['n_methods_ok']}",
+            "",
+            "ПОШАГОВО:",
+        ]
+        for r in self.step_results:
+            mark = "OK" if r["ok"] else "FAIL"
+            lines.append(
+                f"  [{mark}] {r['idx']:2d}. {r['role']:12s} "
+                f"({r.get('id', '')}) -> {r['out_dir']}")
+        (self.out_dir / "pipeline_report.txt").write_text(
+            "\n".join(lines), encoding="utf-8")
+        return summary
 
 
 class PipelineComposer(QWidget):
@@ -4478,47 +3988,129 @@ class PipelineComposer(QWidget):
         if self.pipe_list.count() == 0:
             QMessageBox.warning(self, "Ошибка", "Конвейер пуст.")
             return
-        # проверка порядка
+
         steps = []
         for i in range(self.pipe_list.count()):
-            d = self.pipe_list.item(i).data(Qt.UserRole) or {}
-            steps.append(d)
-        # предупреждения
+            it = self.pipe_list.item(i)
+            d = it.data(Qt.UserRole) or {}
+            steps.append({"index": i + 1, "label": it.text(),
+                          "data": d})
+
         warns = []
-        for i, d in enumerate(steps):
-            if d.get("role") == "export" and i < len(steps) - 1:
-                warns.append(f"export на шаге {i+1} — не последний.")
-            if i > 0 and d.get("role") == "semantic" and \
-                    steps[i-1].get("role") == "semantic":
-                warns.append(f"два semantic подряд: шаги {i}, {i+1}.")
+        for i, s in enumerate(steps):
+            role = s["data"].get("role")
+            if role == "export" and i < len(steps) - 1:
+                warns.append(f"export на шаге {s['index']} не последний")
+            if (i > 0 and role == "semantic"
+                    and steps[i-1]["data"].get("role") == "semantic"):
+                warns.append(
+                    f"два semantic подряд: "
+                    f"{steps[i-1]['index']}, {s['index']}")
         if warns:
             ans = QMessageBox.question(
                 self, "Порядок вызывает вопросы",
-                "Найдены потенциальные проблемы:\n\n• "
-                + "\n• ".join(warns)
+                "Найдены проблемы:\n• " + "\n• ".join(warns)
                 + "\n\nПродолжить?",
                 QMessageBox.Yes | QMessageBox.No)
             if ans != QMessageBox.Yes:
                 return
 
-        self.log.log("=" * 60, "INFO")
-        self.log.log(f"ЗАПУСК КОНВЕЙЕРА из {len(steps)} шагов", "INFO")
-        self.log.log("=" * 60, "INFO")
-        for i, d in enumerate(steps):
-            label = self.pipe_list.item(i).text()
-            self.log.log(f"[{i+1}/{len(steps)}] {label}", "INFO")
-            # пока это заглушка — реальный запуск требует
-            # рефакторинга RealTrainer под pipeline-режим.
-            self.log.log(
-                f"    (интеграция шага '{d.get('id')}' — "
-                f"следующая итерация разработки)", "WARNING")
-        self.log.log(
-            "Подсказка: одиночные прогоны по-прежнему доступны на "
-            "подвкладке «Одиночная модель».", "SUCCESS")
+        out_dir = TRAINING_OUTPUT_DIR / (
+            f"pipeline_{datetime.now():%Y%m%d-%H%M%S}")
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-# ============================================================================
-# Вкладка 5 — Обучение M1-M6
-# ============================================================================
+        self.log.log("=" * 60, "INFO")
+        self.log.log(f"ЗАПУСК КОНВЕЙЕРА: {len(steps)} шагов", "INFO")
+        self.log.log(f"Выходная папка: {out_dir}", "INFO")
+        self.log.log("=" * 60, "INFO")
+
+        tt = self.training_tab
+        cd = getattr(tt.main_window, "crs_detector", None)
+        snapshot = {
+            "pointcloud_path": str(getattr(tt.main_window, "pcd_path", "") or ""),
+            "m5_las_refs": [tt.m5_las_list.item(i).text() for i in range(tt.m5_las_list.count())],
+            "rasters": [tt.m2_raster_path.text()] if tt.m2_raster_path.text() else [],
+            "dem_path": tt.m4_dem_path.text(), "gis_path": tt.m6_gis_path.text(),
+            "crs_epsg": getattr(cd, "crs", None), "vertical_crs": None, "height_offset": 0,
+            "m1_options": dict(_APP_SETTINGS.get("m1", {}),
+                ground_backend=tt.m1_ground.currentText(), model=tt.m1_cpu_model.text().strip(),
+                preserve_classes=tt.m1_preserve.isChecked()),
+        }
+        if any(x["data"].get("role") in ("geometry","feature") for x in steps):
+            if QMessageBox.question(self, "Единицы координат", "Подтвердите единицы XY/Z: метры.",
+                    QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+                return
+            snapshot["m1_options"]["units"] = "metres"
+        lt=tt.main_window.tabs.widget(0)
+        snapshot["vertical_crs"]=lt.vertical_crs_combo.currentData()
+        snapshot["height_offset"]=lt.height_offset_spin.value()
+        radius,neighbors=[(0.6,16),(1.0,32),(1.5,64)][tt.m1_profile.currentIndex()]
+        snapshot["m1_options"].update(scanning_type=getattr(tt.main_window,"scanning_type","unknown"),radius=radius,neighbors=neighbors)
+        from city3d_backend.core import sha256, VALID_CLASSES
+        classes=tt._load_classifier()
+        if classes:snapshot["m1_options"]["allowed_classes"]=tuple(c["code"] for c in classes if c["code"] in VALID_CLASSES)
+        cf=Path(__file__).parent/"classifier.txt"
+        snapshot["classifier_sha256"]=sha256(cf) if cf.exists() else None
+        snapshot["m3_image"]=tt.m3_image.text().strip()
+        snapshot["m3_checkpoint"]=tt.m3_checkpoint.text().strip()
+        snapshot["models_root"]=_APP_SETTINGS.get("models_root",str(PROJECTS_DIR/"city3d_models"))
+        snapshot["database"]=dict(DB_PARAMS)
+        worker = WorkerThread(self._pipeline_task_real, steps,
+                              str(out_dir), snapshot)
+        worker.log_signal.connect(self.log.log)
+        worker.detail_signal.connect(
+            lambda s: self.log.log(s, "INFO"))
+        worker.progress.connect(
+            lambda p: self.log.log(f"progress {p}%", "INFO"))
+        worker.task_done.connect(
+            lambda ok: self.log.log(
+                "КОНВЕЙЕР ЗАВЕРШЁН" if ok else "КОНВЕЙЕР ПРОВАЛЕН",
+                "SUCCESS" if ok else "ERROR"))
+        worker.start()
+        self._worker = worker
+
+    def _pipeline_task_real(self, emit_log, emit_progress, steps, out_dir, snapshot=None):
+        from city3d_backend.runner import PipelineRunner, Task
+        from city3d_backend.registry import DEFINITIONS
+        from city3d_backend.database import LocalJournal, Repository
+        snapshot=snapshot or {}
+        tasks=[];previous=None;classified=None
+        for i,step in enumerate(steps):
+            d=step["data"];mid=d.get("id","");task_id=f"step_{i+1}"
+            dependencies=(previous,) if previous else ()
+            adapter=DEFINITIONS.get(mid,(None,))[0]
+            inputs={};params={};mode="infer"
+            if adapter=="m1.cpu":
+                inputs={"asset":snapshot.get("pointcloud_path","")};params={"config":snapshot.get("m1_options",{})};classified=task_id
+            elif adapter=="m4.features":
+                inputs={"asset":snapshot.get("dem_path","")};params={"units":"metres"}
+            elif adapter=="m5.qa":
+                refs=snapshot.get("m5_las_refs",[])
+                inputs={"asset":refs[0] if refs else snapshot.get("pointcloud_path","")};mode="evaluate"
+            elif adapter=="m6.vector":inputs={"asset":snapshot.get("gis_path","")}
+            elif adapter=="m3.raster":
+                inputs={"asset":snapshot.get("m3_image","")};params={"checkpoint":snapshot.get("m3_checkpoint","")}
+            elif adapter=="yolo.detect":
+                rasters=snapshot.get("rasters",[]);inputs={"asset":rasters[0] if rasters else ""}
+                model=self.registry.by_id(mid) or {};weight=Path(model.get("weights", ""))
+                if not weight.is_absolute():weight=Path(snapshot["models_root"])/str(weight).removeprefix("models/")
+                params={"checkpoint":str(weight),"model_id":mid}
+            elif mid=="export:LAS" or (d.get("role")=="export" and mid in ("export","LAS")):
+                adapter="export.las";mode="export"
+                inputs={"asset":{"task":classified,"output":"classified"}} if classified else {}
+                dependencies=tuple(dict.fromkeys(dependencies+((classified,) if classified else ())))
+            # Unimplemented methods remain explicit in preflight; no role/string guessing.
+            tasks.append(Task(task_id,adapter or mid,mode,dependencies,inputs,params));previous=task_id
+        journal=LocalJournal(Path(out_dir)/"outbox.sqlite")
+        runner=PipelineRunner(journal=journal,repository=Repository({"database":snapshot.get("database",{})}))
+        result=runner.run(tasks,out_dir,
+            cancel=lambda:QThread.currentThread().isInterruptionRequested(),progress=emit_progress,
+            spatial={"vertical_crs":snapshot.get("vertical_crs"),"height_offset":snapshot.get("height_offset"),
+                     "classifier_sha256":snapshot.get("classifier_sha256"),"ontology_version":"city3d:1"})
+        emit_log("Конвейер: "+result["status"]+"; регистрация БД: "+result["db_registration"],"SUCCESS" if result["status"]=="success" else "ERROR")
+        for key,state in result["steps"].items():emit_log(key+": "+json.dumps(state,ensure_ascii=False),"INFO")
+        return result["status"]=="success"
+
 
 class TrainingTab(QWidget):
     def __init__(self, main_window):
@@ -4532,6 +4124,16 @@ class TrainingTab(QWidget):
         self.sub_tabs = QTabWidget()
 
         # --- подвкладка 1: одиночная модель (существующая логика) -----
+        # PATCHED_LAYOUT_FIX: оборачиваем в QScrollArea, чтобы при
+        # нехватке вертикального места виджеты не накладывались
+        single_container = QWidget()
+        single_container_layout = QVBoxLayout(single_container)
+        single_container_layout.setContentsMargins(0, 0, 0, 0)
+
+        single_scroll = QScrollArea()
+        single_scroll.setWidgetResizable(True)
+        single_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
         single = QWidget()
         layout = QVBoxLayout(single)
         method_layout = QHBoxLayout()
@@ -4562,7 +4164,10 @@ class TrainingTab(QWidget):
         layout.addWidget(self.method_stack)
         layout.addWidget(self._create_params_widget())
 
-        self.sub_tabs.addTab(single, "Одиночная модель")
+        # PATCHED_LAYOUT_FIX: завершаем обёртку scroll area
+        single_scroll.setWidget(single)
+        single_container_layout.addWidget(single_scroll)
+        self.sub_tabs.addTab(single_container, "Одиночная модель")
 
         # --- подвкладка 2: реестр моделей ------------------------------
         try:
@@ -4592,7 +4197,7 @@ class TrainingTab(QWidget):
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.addWidget(QLabel(
-            "M1: RANSAC + DBSCAN по облаку точек."))
+            "M1: SMRF/CSF → HAG → геометрические признаки → CPU ExtraTrees. Без модели распознаётся земля; остальные объекты требуют разметки."))
         g = QGroupBox("Параметры M1")
         f = QFormLayout()
         self.m1_primitive = QComboBox()
@@ -4606,6 +4211,24 @@ class TrainingTab(QWidget):
         self.m1_ransac_threshold.setValue(0.05)
         self.m1_ransac_threshold.setDecimals(3)
         f.addRow("RANSAC threshold:", self.m1_ransac_threshold)
+        self.m1_primitive.setEnabled(False)
+        self.m1_ransac_threshold.setEnabled(False)
+        self.m1_ground = QComboBox()
+        self.m1_ground.addItems(["smrf", "csf", "trusted", "legacy"])
+        self.m1_ground.setCurrentText(_APP_SETTINGS.get("m1", {}).get("ground_backend", "smrf"))
+        f.addRow("Ground backend:", self.m1_ground)
+        self.m1_cpu_model = QLineEdit(_APP_SETTINGS.get("m1", {}).get("model", ""))
+        self.m1_cpu_model.setPlaceholderText("Локальная доверенная модель .joblib; обучение через city3d-cli train")
+        f.addRow("CPU модель:", self.m1_cpu_model)
+        self.m1_profile = QComboBox()
+        self.m1_profile.addItems(["Быстро", "Сбалансированно", "Точно"])
+        self.m1_profile.setCurrentIndex(1)
+        f.addRow("Признаки:", self.m1_profile)
+        self.m1_preserve = QCheckBox("Сохранять существующие классы кроме 0/1")
+        self.m1_preserve.setChecked(True)
+        f.addRow(self.m1_preserve)
+        f.addRow(QLabel("Словарь классов: class_schema.json; коды 8/12 зарезервированы. Score не является accuracy."))
+
         g.setLayout(f)
         layout.addWidget(g)
         btn = QPushButton("Запустить M1")
@@ -4617,17 +4240,24 @@ class TrainingTab(QWidget):
     def _create_m2_page(self):
         w = QWidget()
         layout = QVBoxLayout(w)
-        layout.addWidget(QLabel("M2: обучение по растрам."))
+        layout.addWidget(QLabel("M2: анализ растра / inference; обучение не реализовано."))
         g = QGroupBox("Растр")
         gl = QHBoxLayout()
         self.m2_raster_path = QLineEdit()
-        self.m2_raster_path.setPlaceholderText("GeoTiff / JPEG / PDF")
+        self.m2_raster_path.setPlaceholderText("GeoTiff / JPEG / PNG; detections имеют pixel coordinates")
         gl.addWidget(self.m2_raster_path)
         b = QPushButton("Обзор...")
         b.clicked.connect(self._browse_m2)
         gl.addWidget(b)
         g.setLayout(gl)
         layout.addWidget(g)
+        m2_form=QFormLayout()
+        self.m2_model_id=QComboBox();self.m2_model_id.addItems(["yolov8n","yoloworld_s"])
+        m2_form.addRow("Model ID:",self.m2_model_id)
+        self.m2_checkpoint=QLineEdit();self.m2_checkpoint.setPlaceholderText("Существующий локальный .pt; автоматической загрузки нет")
+        m2_form.addRow("Checkpoint:",self.m2_checkpoint)
+        layout.addLayout(m2_form)
+        self.m2_model_id.setToolTip("YOLO-World требует проверенного offline text encoder; пока adapter blocked, подмена на YOLOv8 запрещена")
         btn = QPushButton("Запустить M2")
         btn.clicked.connect(lambda: self._run_method("M2"))
         layout.addWidget(btn)
@@ -4635,24 +4265,21 @@ class TrainingTab(QWidget):
         return w
 
     def _create_m3_page(self):
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.addWidget(QLabel("M3: PyTorch U-Net по маскам."))
-        g = QGroupBox("Слой")
-        f = QFormLayout()
-        self.m3_layer = QComboBox()
-        self.m3_layer.addItems([
-            "BUILDINGS", "ROADS", "HYDROGRAPHY", "PIPELINES",
-            "RAILWAYS", "FENCES", "POWER_LINES",
-            "TREE_VEGETATION", "GRASS_VEGETATION", "SWAMPS", "SANDS"])
-        f.addRow("Тип:", self.m3_layer)
-        g.setLayout(f)
-        layout.addWidget(g)
-        btn = QPushButton("Запустить M3")
-        btn.clicked.connect(lambda: self._run_method("M3"))
-        layout.addWidget(btn)
-        layout.addStretch()
-        return w
+        w=QWidget();layout=QVBoxLayout(w)
+        label=QLabel("M3: реальное обучение CPU U-Net по GeoTIFF image/mask. Классы и bands задаёт manifest; стартовые веса не скачиваются.")
+        label.setWordWrap(True);layout.addWidget(label)
+        form=QFormLayout();self.m3_manifest=QLineEdit();self.m3_manifest.setPlaceholderText("training.json: gold labels, независимые train/val территории")
+        form.addRow("Training manifest:",self.m3_manifest)
+        self.m3_checkpoint=QLineEdit();self.m3_checkpoint.setPlaceholderText("Локальная проверенная модель .npz и .json")
+        form.addRow("Checkpoint:",self.m3_checkpoint)
+        self.m3_finetune=QCheckBox("Дообучить выбранный checkpoint в НОВУЮ версию");form.addRow(self.m3_finetune)
+        self.m3_image=QLineEdit();self.m3_image.setPlaceholderText("GeoTIFF с совместимыми bands");form.addRow("Raster inference:",self.m3_image)
+        self.m3_layer=QComboBox();self.m3_layer.addItem("Классы из manifest/checkpoint");self.m3_layer.setEnabled(False);form.addRow("Class schema:",self.m3_layer)
+        layout.addLayout(form)
+        b=QPushButton("Обучить / дообучить M3");b.clicked.connect(lambda:self._run_method("M3"));layout.addWidget(b)
+        b=QPushButton("Применить M3 к растру");b.clicked.connect(self._run_m3_infer);layout.addWidget(b)
+        layout.addWidget(QLabel("Формат manifest и пример: resources/raster_training_example.json. Выход: model.npz + training report либо georeferenced labels.tif."))
+        layout.addStretch();return w
 
     def _create_m4_page(self):
         w = QWidget()
@@ -4677,15 +4304,30 @@ class TrainingTab(QWidget):
     def _create_m5_page(self):
         w = QWidget()
         layout = QVBoxLayout(w)
-        layout.addWidget(QLabel("M5: анализ ASPRS-классов."))
-        g = QGroupBox("LAS")
-        gl = QHBoxLayout()
-        self.m5_las_path = QLineEdit()
-        self.m5_las_path.setPlaceholderText("LAS с classification")
-        gl.addWidget(self.m5_las_path)
-        b = QPushButton("Обзор...")
-        b.clicked.connect(self._browse_m5)
-        gl.addWidget(b)
+        layout.addWidget(QLabel(
+            "M5: анализ ASPRS-классов. Можно загрузить несколько LAS.\n"
+            "Каждый файл автоматически регистрируется в базе эталонов "
+            "(вкладка 7)."))
+        g = QGroupBox("LAS-файлы (M5_LAS_LIST)")
+        gl = QVBoxLayout()
+        self.m5_las_list = QListWidget()
+        self.m5_las_list.setSelectionMode(
+            QAbstractItemView.ExtendedSelection)
+        self.m5_las_list.setToolTip(
+            "Список загруженных LAS. Можно добавлять несколько.")
+        gl.addWidget(self.m5_las_list)
+        row = QHBoxLayout()
+        b_add = QPushButton("Добавить LAS...")
+        b_add.clicked.connect(self._browse_m5)
+        row.addWidget(b_add)
+        b_remove = QPushButton("Удалить выделенные")
+        b_remove.clicked.connect(self._remove_m5_las)
+        row.addWidget(b_remove)
+        b_clear = QPushButton("Очистить")
+        b_clear.clicked.connect(self._clear_m5_las)
+        row.addWidget(b_clear)
+        row.addStretch()
+        gl.addLayout(row)
         g.setLayout(gl)
         layout.addWidget(g)
         btn = QPushButton("Запустить M5")
@@ -4693,6 +4335,13 @@ class TrainingTab(QWidget):
         layout.addWidget(btn)
         layout.addStretch()
         return w
+
+    def _remove_m5_las(self):
+        for item in self.m5_las_list.selectedItems():
+            self.m5_las_list.takeItem(self.m5_las_list.row(item))
+
+    def _clear_m5_las(self):
+        self.m5_las_list.clear()
 
     def _create_m6_page(self):
         w = QWidget()
@@ -4751,16 +4400,24 @@ class TrainingTab(QWidget):
         ml = QFormLayout()
         self.dataset_path = QLineEdit()
         self.dataset_path.setPlaceholderText("Путь к датасету")
-        ml.addRow("Датасет:", self.dataset_path)
-        b = QPushButton("Обзор...")
-        b.clicked.connect(self.browse_dataset)
-        ml.addRow("", b)
+        # PATCHED_LAYOUT_FIX: Обзор в одну строку с полем Датасет,
+        # иначе кнопка налезает на Эпох/Классов при сжатии
+        _ds_row = QHBoxLayout()
+        _ds_row.setContentsMargins(0, 0, 0, 0)
+        _ds_row.addWidget(self.dataset_path, 1)
+        _browse_btn = QPushButton("Обзор...")
+        _browse_btn.setMaximumWidth(90)
+        _browse_btn.clicked.connect(self.browse_dataset)
+        _ds_row.addWidget(_browse_btn)
+        ml.addRow("Датасет:", _ds_row)
         self.epochs = QSpinBox()
         self.epochs.setRange(1, 500)
         self.epochs.setValue(50)
         ml.addRow("Эпох:", self.epochs)
         self.num_classes = QSpinBox()
         self.num_classes.setRange(2, 100)
+        self.num_classes.setEnabled(False)
+        self.num_classes.setToolTip("Число классов задаёт версионный manifest/checkpoint; старый числовой override отключён")
         self.num_classes.setValue(8)
         ml.addRow("Классов:", self.num_classes)
         mg.setLayout(ml)
@@ -4772,6 +4429,28 @@ class TrainingTab(QWidget):
         self.eta_label.setStyleSheet(
             "color: #dcdcaa; font-family: monospace; padding: 2px;")
         layout.addWidget(self.eta_label)
+        # ── ПАНЕЛЬ МОНИТОРИНГА ────────────────────────────────
+        mon_gb = QGroupBox("Мониторинг качества (live)")
+        mon_l = QVBoxLayout(mon_gb)
+        self.monitor_label = QLabel("Ожидание запуска...")
+        self.monitor_label.setWordWrap(True)
+        self.monitor_label.setFont(QFont("Monospace", 9))
+        self.monitor_label.setStyleSheet(
+            "color: #dcdcaa; padding: 6px; background: #1a1a1a; "
+            "border-radius: 4px;")
+        mon_l.addWidget(self.monitor_label)
+
+        btn_row = QHBoxLayout()
+        self.btn_stop_training = QPushButton("⛔ Остановить обучение")
+        self.btn_stop_training.setStyleSheet(
+            "background-color: #a03030; color: white; font-weight: bold;")
+        self.btn_stop_training.setEnabled(False)
+        self.btn_stop_training.clicked.connect(self._stop_training)
+        btn_row.addWidget(self.btn_stop_training)
+        btn_row.addStretch()
+        mon_l.addLayout(btn_row)
+        layout.addWidget(mon_gb)
+
         self.result_label = QLabel("Результат последнего прогона: —")
         self.result_label.setWordWrap(True)
         self.result_label.setStyleSheet(
@@ -4796,10 +4475,15 @@ class TrainingTab(QWidget):
             self.m4_dem_path.setText(p)
 
     def _browse_m5(self):
-        p, _ = QFileDialog.getOpenFileName(
-            self, "LAS", "", "LAS (*.las *.laz);;All Files (*)")
-        if p:
-            self.m5_las_path.setText(p)
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "LAS (можно несколько)", "",
+            "LAS (*.las *.laz);;All Files (*)")
+        for p in paths:
+            # не дублируем
+            existing = [self.m5_las_list.item(i).text()
+                        for i in range(self.m5_las_list.count())]
+            if p not in existing:
+                self.m5_las_list.addItem(p)
 
     def _browse_m6(self):
         p, _ = QFileDialog.getOpenFileName(
@@ -4906,6 +4590,35 @@ class TrainingTab(QWidget):
                             "min_points": min_pts})
         return classes
 
+
+    def _stop_training(self):
+        """Запрос на остановку текущего обучения."""
+        w = getattr(self, "_worker", None)
+        if w is None or not w.isRunning():
+            return
+        try:
+            w.requestInterruption()
+            self.log.log("⛔ Запрошена остановка обучения. "
+                         "Ожидание завершения текущего шага...",
+                         "WARNING")
+            self.monitor_label.setText(
+                "⛔ ОСТАНОВКА... дождитесь завершения текущего шага")
+            self.btn_stop_training.setEnabled(False)
+        except Exception as e:
+            self.log.log(f"Ошибка остановки: {e}", "ERROR")
+
+    def _on_worker_detail(self, msg):
+        """Обработчик detail_signal от WorkerThread — обновляет монитор."""
+        if not hasattr(self, "monitor_label"):
+            return
+        self.monitor_label.setText(msg)
+        # Эвристика: если в сообщении — "quality" или "кач", подсвечиваем
+        low = msg.lower()
+        if "quality_score" in low or "качество" in low:
+            self.monitor_label.setStyleSheet(
+                "color: #4ec9b0; padding: 6px; background: #1a1a1a; "
+                "border-radius: 4px;")
+
     def _run_method(self, method_name):
         # F. Проверка эталонов до запуска
         try:
@@ -4914,18 +4627,43 @@ class TrainingTab(QWidget):
             self.log.log(f"Проверка эталонов: {e}", "WARNING")
 
         if method_name == "M1":
-            src = str(WORKSPACE / "pointcloud_clean.ply")
-            if not Path(src).exists():
-                src = (getattr(self.main_window, "clean_pcd_path", None)
-                       or getattr(self.main_window, "pcd_path", None) or "")
+            src = getattr(self.main_window, "pcd_path", None) or ""
         elif method_name == "M2":
             src = self.m2_raster_path.text()
         elif method_name == "M3":
-            src = self.dataset_path.text()
+            src = self.m3_manifest.text().strip()
         elif method_name == "M4":
             src = self.m4_dem_path.text()
         elif method_name == "M5":
-            src = self.m5_las_path.text()
+            files = [self.m5_las_list.item(i).text()
+                     for i in range(self.m5_las_list.count())]
+            if not files:
+                QMessageBox.warning(self, "Ошибка",
+                                    "Добавьте хотя бы один LAS")
+                return
+            # Регистрируем каждый файл в БД (вкладка 7)
+            hdb0 = getattr(self.main_window, "history_db", None)
+            if hdb0 and hdb0.is_available:
+                for p in files:
+                    try:
+                        self._register_las_in_refs(p)
+                    except Exception as e:
+                        self.log.log(
+                            f"Регистрация {Path(p).name}: {e}",
+                            "WARNING")
+            # Запускаем обработку по каждому файлу последовательно
+            output_dir = self._make_run_dir("M5")
+            st = getattr(self.main_window, "scanning_type", "unknown")
+            hyper = {"ransac_threshold": self.m1_ransac_threshold.value()}
+            worker = WorkerThread(self._train_multi_m5_task,
+                                  files, str(output_dir), hyper)
+            worker.log_signal.connect(self.log.log)
+            worker.detail_signal.connect(self.eta_label.setText)
+            worker.progress.connect(self.progress.setValue)
+            worker.task_done.connect(self._on_training_done)
+            worker.start()
+            self._worker = worker
+            return
         elif method_name == "M6":
             src = self.m6_gis_path.text()
         else:
@@ -4935,6 +4673,9 @@ class TrainingTab(QWidget):
                                 f"Источник {method_name} не найден: {src}")
             return
 
+        if method_name == "M4":
+            if QMessageBox.question(self,"Единицы DEM","Подтвердите: XY и Z DEM заданы в метрах.",QMessageBox.Yes|QMessageBox.No)!=QMessageBox.Yes:
+                return
         output_dir = self._make_run_dir(method_name)
         st = getattr(self.main_window, "scanning_type", "unknown")
         hyper = {
@@ -4972,6 +4713,10 @@ class TrainingTab(QWidget):
                     except Exception:
                         pass
 
+        if method_name=="M2":
+            hyper["m2_options"]={"model_id":self.m2_model_id.currentText(),"checkpoint":self.m2_checkpoint.text().strip()}
+        if method_name=="M3" and self.m3_finetune.isChecked():
+            hyper["m3_parent"]=self.m3_checkpoint.text().strip()
         # Загружаем список классов из classifier.txt (если есть)
         classes = self._load_classifier()
         if classes:
@@ -4979,14 +4724,152 @@ class TrainingTab(QWidget):
                 f"Загружен classifier.txt: {len(classes)} классов "
                 f"({', '.join(c['name'] for c in classes[:6])}"
                 f"{'…' if len(classes) > 6 else ''})", "INFO")
+        hyper["scanning_type"] = getattr(self.main_window, "scanning_type", "unknown")
+        cd = getattr(self.main_window, "crs_detector", None)
+        hyper["crs_epsg"] = getattr(cd, "crs", None)
+        hyper["dataset_root"] = str(getattr(self.main_window, "dataset_root", "") or "")
+        if method_name == "M1":
+            if Path(src).suffix.lower() not in (".las", ".laz"):
+                QMessageBox.warning(self, "M1", "Для сохранения исходных измерений выберите оригинальный LAS/LAZ")
+                return
+            if QMessageBox.question(self, "Единицы координат",
+                    "Подтвердите: исходные XY и Z заданы в метрах. Географические координаты нужно перепроецировать отдельно.",
+                    QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+                return
+            options = dict(_APP_SETTINGS.get("m1", {}))
+            profiles = [(0.6, 16), (1.0, 32), (1.5, 64)]
+            radius, neighbors = profiles[self.m1_profile.currentIndex()]
+            options.update(units="metres", scanning_type=hyper["scanning_type"],
+                           ground_backend=self.m1_ground.currentText(), model=self.m1_cpu_model.text().strip(),
+                           preserve_classes=self.m1_preserve.isChecked(), radius=radius, neighbors=neighbors)
+            lt=self.main_window.tabs.widget(0)
+            hyper["spatial"]={"vertical_crs":lt.vertical_crs_combo.currentData(),"height_offset":lt.height_offset_spin.value()}
+            hyper["m1_options"] = options
         worker = WorkerThread(self._train_task, method_name, src,
                               str(output_dir), hyper, classes)
         worker.log_signal.connect(self.log.log)
-        worker.detail_signal.connect(self.eta_label.setText)
+        worker.detail_signal.connect(self._on_worker_detail)
         worker.progress.connect(self.progress.setValue)
         worker.task_done.connect(self._on_training_done)
         worker.start()
         self._worker = worker
+        if hasattr(self, "btn_stop_training"):
+            self.btn_stop_training.setEnabled(True)
+        if hasattr(self, "monitor_label"):
+            self.monitor_label.setText(
+                f"▶ {method_name}: запуск...")
+
+
+    # ── M5 helpers ────────────────────────────────────────────────
+    def _register_las_in_refs(self, path):
+        """Регистрирует LAS в refs.references_clouds, если его там нет."""
+        import numpy as np
+        from pathlib import Path as _P
+        hdb = getattr(self.main_window, "history_db", None)
+        if not hdb or not hdb.is_available:
+            return
+        p = _P(path)
+        with hdb.conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT id FROM {hdb.schema_r}.references_clouds
+                WHERE path=%s LIMIT 1
+            """, (str(p),))
+            if cur.fetchone():
+                return  # уже есть
+        # Читаем header LAS без полной загрузки
+        try:
+            import laspy
+            with laspy.open(p) as fh:
+                h = fh.header
+                n_points = h.point_count
+                xmin, ymin = h.x_min, h.y_min
+                xmax, ymax = h.x_max, h.y_max
+                zmin, zmax = h.z_min, h.z_max
+        except Exception as e:
+            self.log.log(f"Не удалось прочитать {p.name}: {e}", "WARNING")
+            return
+        # CRS: определяем из VLR или из main_window.crs_detector
+        crs = None
+        if getattr(self.main_window, "crs_detector", None):
+            crs = self.main_window.crs_detector.crs
+        bbox_line = hdb._bbox_to_box3d((xmin, ymin, zmin, xmax, ymax, zmax))
+        with hdb.conn.cursor() as cur:
+            cur.execute(f"""
+                INSERT INTO {hdb.schema_r}.references_clouds
+                    (name, path, format, n_points, scanning_type,
+                     crs_epsg, bbox, description)
+                VALUES (%s, %s, 'LAS', %s, %s, %s, %s::box3d, %s)
+            """, (p.stem, str(p), int(n_points),
+                  getattr(self.main_window, "scanning_type", "unknown"),
+                  crs, bbox_line, "Авторегистрация из M5"))
+        self.log.log(f"Зарегистрировано в БД: {p.name} "
+                     f"({n_points:,} точек)", "SUCCESS")
+
+    def _train_multi_m5_task(self, emit_log, emit_progress,
+                             files, out_dir, hyper):
+        """Обрабатывает список LAS для M5 последовательно."""
+        from pathlib import Path as _P
+        import time as _time
+        mw = self.main_window
+        hdb = getattr(mw, "history_db", None)
+        run_id = None
+        t0 = _time.time()
+        if hdb and hdb.is_available:
+            run_id = hdb.start_run(
+                method="M5",
+                scanning_type=(hyper or {}).get("scanning_type", "unknown"),
+                crs_epsg=(getattr(mw.crs_detector, "crs", None)
+                          if mw.crs_detector else None),
+                source_path=";".join(files),
+                hyperparams=hyper or {},
+                n_points=None, bbox=None, bbox_4326=None)
+        trainer = RealTrainer(EmitLogger(emit_log))
+        n = len(files)
+        all_ok = True
+        total_classes = {}
+        for i, f in enumerate(files):
+            emit_log(f"─── [{i+1}/{n}] {_P(f).name} ───", "INFO")
+            sub_dir = _P(out_dir) / f"{i+1:02d}_{_P(f).stem}"
+            sub_dir.mkdir(parents=True, exist_ok=True)
+            ok = trainer.train_m5(f, str(sub_dir))
+            if not ok:
+                all_ok = False
+            # Собираем статистику
+            stats_file = sub_dir / "m5_qa.json"
+            if stats_file.exists():
+                try:
+                    import json as _j
+                    d = _j.loads(stats_file.read_text())
+                    for k, v in d.get("classes", {}).items():
+                        total_classes[k] = total_classes.get(k, 0) + v
+                except Exception:
+                    pass
+            emit_progress(int(100 * (i + 1) / n))
+        # Сводный отчёт
+        try:
+            import json as _j
+            summary = {
+                "method": "M5_multi",
+                "n_files": n,
+                "files": files,
+                "aggregated_classes": total_classes,
+                "duration_sec": _time.time() - t0,
+            }
+            (_P(out_dir) / "m5_multi_summary.json").write_text(
+                _j.dumps(summary, ensure_ascii=False, indent=2),
+                encoding="utf-8")
+            emit_log(
+                f"M5: сводка по {n} файлам → m5_multi_summary.json",
+                "SUCCESS")
+        except Exception as e:
+            emit_log(f"M5: сводка не создана: {e}", "WARNING")
+        if hdb and hdb.is_available and run_id:
+            hdb.finish_run(run_id,
+                           "success" if all_ok else "partial",
+                           metrics={"n_files": n,
+                                    "classes": total_classes},
+                           duration_sec=_time.time() - t0)
+        return all_ok
 
     def _run_combined(self):
         selected = [m for m, cb in self.combo_checks.items()
@@ -5013,6 +4896,12 @@ class TrainingTab(QWidget):
 
     def _on_training_done(self, ok):
         self.progress.setValue(100 if ok else 0)
+        if hasattr(self, "btn_stop_training"):
+            self.btn_stop_training.setEnabled(False)
+        if hasattr(self, "monitor_label"):
+            state = "✅ завершено" if ok else "❌ ошибка/остановка"
+            self.monitor_label.setText(
+                f"{self.monitor_label.text()}\n── {state} ──")
         try:
             hist = self.main_window.tabs.widget(7)
             if hasattr(hist, "reload"):
@@ -5064,44 +4953,38 @@ class TrainingTab(QWidget):
             bbox = None
             bbox_4326 = None
             n_points = None
-            crs = getattr(mw.crs_detector, "crs", None) \
-                if mw.crs_detector else None
-            if mw.pcd is not None:
-                pts = np.asarray(mw.pcd.points)
-                bbox = (float(pts[:, 0].min()), float(pts[:, 1].min()),
-                        float(pts[:, 2].min()), float(pts[:, 0].max()),
-                        float(pts[:, 1].max()), float(pts[:, 2].max()))
-                n_points = len(pts)
-                if crs:
-                    try:
-                        from pyproj import Transformer
-                        tr = Transformer.from_crs(
-                            crs, 4326, always_xy=True)
-                        xs, ys = tr.transform(
-                            [bbox[0], bbox[3], bbox[3], bbox[0]],
-                            [bbox[1], bbox[1], bbox[4], bbox[4]])
-                        bbox_4326 = (min(xs), min(ys), max(xs), max(ys))
-                    except Exception:
-                        pass
+            crs = (hyper or {}).get("crs_epsg")
+            if Path(src).suffix.lower() in (".las", ".laz"):
+                import laspy
+                with laspy.open(src) as reader:
+                    h = reader.header
+                    bbox = tuple(h.mins) + tuple(h.maxs)
+                    n_points = h.point_count
             run_id = hdb.start_run(
                 method=method,
-                scanning_type=getattr(mw, "scanning_type", "unknown"),
+                scanning_type=(hyper or {}).get("scanning_type", "unknown"),
                 crs_epsg=crs,
                 source_path=src,
-                dataset_root=getattr(mw, "dataset_root", None),
+                dataset_root=(hyper or {}).get("dataset_root"),
                 hyperparams=hyper or {},
                 n_points=n_points,
                 bbox=bbox,
                 bbox_4326=bbox_4326)
 
         trainer = RealTrainer(EmitLogger(emit_log))
-        emit_progress(20)
+        trainer._scanning_type = (hyper or {}).get("scanning_type", "unknown")
+        trainer._m1_options = (hyper or {}).get("m1_options", {})
+        trainer._spatial_snapshot=(hyper or {}).get("spatial",{})
+        trainer._m3_parent=(hyper or {}).get("m3_parent")
+        trainer._m3_progress=emit_progress
+        trainer._m2_snapshot=(hyper or {}).get("m2_options",{})
+        emit_progress(0)
         if method == "M1":
             result = trainer.train_m1(
                 src, out_dir,
                 ransac_threshold=float(
                     (hyper or {}).get("ransac_threshold",
-                                      self.m1_ransac_threshold.value())),
+                                      0.05)),
                 classifier_classes=classes,
                 emit_progress=emit_progress)
         elif method == "M2":
@@ -5110,9 +4993,9 @@ class TrainingTab(QWidget):
             result = trainer.train_m3(
                 src, out_dir,
                 n_classes=int((hyper or {}).get(
-                    "n_classes", self.num_classes.value())),
+                    "n_classes", 11)),
                 epochs=int((hyper or {}).get(
-                    "epochs", self.epochs.value())))
+                    "epochs", 10)))
         elif method == "M4":
             result = trainer.train_m4(src, out_dir)
         elif method == "M5":
@@ -5121,7 +5004,8 @@ class TrainingTab(QWidget):
             result = trainer.train_m6(src, out_dir)
         else:
             result = False
-        emit_progress(100)
+        if result:
+            emit_progress(100)
         duration = time.time() - t0
 
         metrics = {}
@@ -5133,7 +5017,7 @@ class TrainingTab(QWidget):
                         metrics.update(d)
                 except Exception:
                     pass
-            m1j = Path(out_dir) / "m1_vectors.json"
+            m1j = Path(out_dir) / "metrics.json"
             if m1j.exists():
                 d = json.loads(m1j.read_text())
                 if "quality_score" in d:
@@ -5143,25 +5027,33 @@ class TrainingTab(QWidget):
 
         if hdb and hdb.is_available and run_id:
             hdb.finish_run(run_id,
-                           "success" if result else "failed",
+                           "success" if result else ("cancelled" if getattr(trainer, "_cancelled", False) else "failed"),
                            metrics=metrics,
                            duration_sec=duration)
             for f in Path(out_dir).iterdir():
                 if f.is_file():
                     hdb.add_artifact(run_id, f.suffix.lstrip("."),
                                      str(f))
-            if result:
-                q = metrics.get("quality_score")
-                if q is None:
-                    q = 0.5
+            if result and metrics.get("quality_score") is not None:
+                q = metrics["quality_score"]
                 hdb.save_preset(
                     method=method,
-                    scanning_type=getattr(mw, "scanning_type", "unknown"),
-                    crs_epsg=(getattr(mw.crs_detector, "crs", None)
-                              if mw.crs_detector else None),
+                    scanning_type=(hyper or {}).get("scanning_type", "unknown"),
+                    crs_epsg=(hyper or {}).get("crs_epsg"),
                     hyperparams=hyper or {},
                     quality_score=float(q),
                     source_run_id=run_id)
+
+        # Живой отчёт по метрикам
+        q = metrics.get("quality_score")
+        if q is not None:
+            if q >= 0.7:
+                verdict = "✅ КАЧЕСТВО ДОСТАТОЧНОЕ"
+            elif q >= 0.4:
+                verdict = "⚠ УДОВЛЕТВОРИТЕЛЬНО — можно улучшить"
+            else:
+                verdict = "❌ НИЗКОЕ — рекомендуем сменить эталоны"
+            emit_log(f"{method}: quality={q:.3f} — {verdict}", "SUCCESS")
 
         if result:
             emit_log(f"{method}: успешно ({duration:.1f} с)", "SUCCESS")
@@ -5177,10 +5069,1249 @@ class TrainingTab(QWidget):
         emit_progress(100)
         return result
 
+    def _run_m3_infer(self):
+        image=self.m3_image.text().strip();checkpoint=self.m3_checkpoint.text().strip()
+        if not Path(image).is_file() or not Path(checkpoint).is_file():
+            QMessageBox.warning(self,"M3","Укажите существующие GeoTIFF и локальный checkpoint .npz")
+            return
+        out=self._make_run_dir("M3_infer")
+        worker=WorkerThread(self._m3_infer_task,image,checkpoint,str(out))
+        worker.log_signal.connect(self.log.log);worker.progress.connect(self.progress.setValue)
+        worker.detail_signal.connect(self._on_worker_detail);worker.task_done.connect(self._on_training_done)
+        worker.start();self._worker=worker;self.btn_stop_training.setEnabled(True)
+
+    def _m3_infer_task(self,emit_log,emit_progress,image,checkpoint,out_dir):
+        from city3d_backend.runner import PipelineRunner,Task
+        result=PipelineRunner().run([Task("M3","m3.raster",inputs={"asset":image},params={"checkpoint":checkpoint})],out_dir,
+            cancel=lambda:QThread.currentThread().isInterruptionRequested(),progress=emit_progress)
+        emit_log("M3 inference: "+result["status"],"SUCCESS" if result["status"]=="success" else "ERROR")
+        if result["status"]!="success":emit_log(str(result["steps"]),"ERROR")
+        return result["status"]=="success"
+
 
 # ============================================================================
 # Вкладка 6 — Экспорт
 # ============================================================================
+
+
+# PATCHED_SLICE_V8 — расширенный экспорт срезов
+# PATCHED_SLICE_V8: helpers — константы и менеджер настроек
+# (вставляется в city3d_pipeline_v5.py перед SliceExporterWidget)
+
+ASPRS_CLASSES = {
+    0:  "Never classified",
+    1:  "Unclassified",
+    2:  "Земля",
+    3:  "Низкая растительность",
+    4:  "Средняя растительность",
+    5:  "Высокая растительность",
+    6:  "Здания",
+    7:  "Шум",
+    8:  "Ключевые точки модели",
+    9:  "Вода",
+    10: "Рельсы",
+    11: "Дорожное покрытие",
+    12: "Перекрытие",
+    13: "Провода (защита)",
+    14: "Провода (проводник)",
+    15: "Опоры ЛЭП",
+    16: "Изоляторы",
+    17: "Мосты",
+    18: "Высокий шум",
+    19: "Высокая растительность (авто)",
+    20: "Здания (авто)",
+    21: "Забор/стена",
+    22: "Дорожное покрытие (авто)",
+    23: "Автомобили",
+}
+
+
+class SliceSettingsManager:
+    """Сохраняет/загружает настройки сессии срезов в JSON."""
+
+    VERSION = "v8.1"
+
+    def __init__(self, path=None):
+        if path is None:
+            try:
+                cfg_dir = Path.home() / ".config" / "city3d"
+                cfg_dir.mkdir(parents=True, exist_ok=True)
+                path = cfg_dir / "slice_settings.json"
+            except Exception:
+                path = None
+        self.path = path
+        self.data = self._default()
+        self.load()
+
+    @staticmethod
+    def _default():
+        base_slice = {
+            "enabled": False,
+            "hag_min": 0.06, "hag_max": 1.00,
+            "mode": 0,                 # 0=all, 1=classes, 2=sections
+            "classes": [2, 6],
+            "step": 0.5,
+            "range_lo": 0.25, "range_hi": 0.25,
+            "range_mode": "strict",    # strict | range
+            "format": 0,               # 0=GeoTIFF, 1=LAS
+            "shape": "square",         # square | round
+            "px_x": 0.10, "px_y": 0.10,
+            "name": "slice_1",
+            "sections_single_file": False,
+        }
+        s1 = dict(base_slice); s1["enabled"] = True
+        s2 = dict(base_slice); s2.update(
+            {"hag_min": 1.00, "hag_max": 2.00, "name": "slice_2"})
+        s3 = dict(base_slice); s3.update(
+            {"hag_min": 2.00, "hag_max": 999.0, "name": "slice_3"})
+        return {
+            "version": SliceSettingsManager.VERSION,
+            "source_paths": [],
+            "source_mode": "single",   # single | files | dir
+            "in_epsg": "",
+            "out_epsg": "",
+            "boundary": {
+                "enable": False,
+                "holes": True,
+                "min_hole_area": 100.0,
+                "concavity": 50.0,
+                "min_area": 0.0,
+                "format": 0,           # 0=GeoJSON, 1=WKT, 2=DXF
+            },
+            "slices": [s1, s2, s3],
+        }
+
+    def load(self):
+        if not self.path or not self.path.exists():
+            return
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            default = self._default()
+            for k, v in default.items():
+                if k not in raw:
+                    raw[k] = v
+            if not isinstance(raw.get("slices"), list):
+                raw["slices"] = default["slices"]
+            while len(raw["slices"]) < 3:
+                raw["slices"].append(default["slices"][len(raw["slices"])])
+            self.data = raw
+        except Exception:
+            self.data = self._default()
+
+    def save(self):
+        if not self.path:
+            return
+        try:
+            self.data["version"] = self.VERSION
+            self.path.write_text(
+                json.dumps(self.data, ensure_ascii=False, indent=2),
+                encoding="utf-8")
+        except Exception:
+            pass
+
+    def get(self, key, default=None):
+        return self.data.get(key, default)
+
+    def set(self, key, value):
+        self.data[key] = value
+
+    def slice_cfg(self, idx):
+        try:
+            return self.data["slices"][idx]
+        except Exception:
+            return self._default()["slices"][idx]
+
+    def update_slice(self, idx, **kwargs):
+        try:
+            self.data["slices"][idx].update(kwargs)
+        except Exception:
+            pass
+
+
+class SliceExporterWidget(QWidget):
+    """Экспорт срезов облака точек по HAG (PATCHED_SLICE_V8).
+
+    Возможности:
+      • Источник: 1 файл / несколько / папка (рекурсивно)
+      • Перепроецирование EPSG вход→выход
+      • Векторные границы (PDAL/alphashape/ConvexHull) с дырами
+      • 3 режима среза: все / по классам ASPRS / сечения рельефа
+      • Сохранение настроек сессии в ~/.config/city3d/slice_settings.json
+    """
+
+    MAX_SLICES = 3
+    MAX_RASTER_PIXELS = 8_000_000_000
+
+    def __init__(self, main_window, parent=None):
+        super().__init__(parent)
+        self.main_window = main_window
+        self._slices = []
+        self._settings = SliceSettingsManager()
+        self._worker = None
+        self._build_ui()
+        self._load_from_settings()
+
+    # ── UI ──────────────────────────────────────────────────
+    def _build_ui(self):
+
+        # Источник
+        src_gb = QGroupBox("Источник LAS")
+        src_l = QVBoxLayout(src_gb)
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Режим:"))
+        self.src_mode_combo = QComboBox()
+        self.src_mode_combo.addItems(
+            ["Один файл", "Несколько файлов", "Папка (рекурсивно)"])
+        mode_row.addWidget(self.src_mode_combo, 1)
+        src_l.addLayout(mode_row)
+        self.src_path = QLineEdit()
+        self.src_path.setPlaceholderText("Выберите файл(ы) или папку с LAS")
+        src_l.addWidget(self.src_path)
+        row = QHBoxLayout()
+        b1 = QPushButton("Файл...")
+        b1.clicked.connect(self._browse_src_file)
+        row.addWidget(b1)
+        b2 = QPushButton("Файлы...")
+        b2.clicked.connect(self._browse_src_files)
+        row.addWidget(b2)
+        b3 = QPushButton("Папка...")
+        b3.clicked.connect(self._browse_src_dir)
+        row.addWidget(b3)
+        b4 = QPushButton("M1")
+        b4.setToolTip("Последний m1_classified.las")
+        b4.clicked.connect(self._use_last_m1)
+        row.addWidget(b4)
+        row.addStretch()
+        src_l.addLayout(row)
+        self.src_list = QListWidget()
+        self.src_list.setMaximumHeight(90)
+        self.src_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        src_l.addWidget(self.src_list)
+        list_row = QHBoxLayout()
+        ba = QPushButton("+ Файлы")
+        ba.clicked.connect(self._add_files_to_list)
+        list_row.addWidget(ba)
+        br = QPushButton("− Удалить")
+        br.clicked.connect(self._remove_from_list)
+        list_row.addWidget(br)
+        bc = QPushButton("Очистить")
+        bc.clicked.connect(lambda: self.src_list.clear())
+        list_row.addWidget(bc)
+        list_row.addStretch()
+        src_l.addLayout(list_row)
+        # PATCHED_SINGLE_SCROLL_V3: единый layout без scroll
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.addWidget(src_gb)
+
+        # Перепроецирование
+        crs_gb = QGroupBox("Перепроецирование (опционально)")
+        crs_l = QFormLayout(crs_gb)
+        self.in_epsg = QLineEdit()
+        self.in_epsg.setPlaceholderText("пусто = из VLR LAS")
+        crs_l.addRow("Входной EPSG:", self.in_epsg)
+        self.out_epsg = QLineEdit()
+        self.out_epsg.setPlaceholderText("пусто = не менять")
+        crs_l.addRow("Выходной EPSG:", self.out_epsg)
+        layout.addWidget(crs_gb)
+
+        # Векторные границы
+        bg = QGroupBox("Векторные границы LAS (boundary)")
+        bl = QFormLayout(bg)
+        self.boundary_enable = QCheckBox("Создать полигон границы")
+        bl.addRow(self.boundary_enable)
+        self.boundary_holes = QCheckBox("Включить отверстия (дыры)")
+        self.boundary_holes.setChecked(True)
+        bl.addRow(self.boundary_holes)
+        self.boundary_min_hole = QDoubleSpinBox()
+        self.boundary_min_hole.setRange(0.0, 1_000_000.0)
+        self.boundary_min_hole.setValue(100.0)
+        self.boundary_min_hole.setSuffix(" м²")
+        bl.addRow("Мин. площадь дыры:", self.boundary_min_hole)
+        self.boundary_concavity = QDoubleSpinBox()
+        self.boundary_concavity.setRange(1.0, 5000.0)
+        self.boundary_concavity.setValue(50.0)
+        self.boundary_concavity.setSuffix(" м")
+        bl.addRow("Вогнутость (concavity):", self.boundary_concavity)
+        self.boundary_min_area = QDoubleSpinBox()
+        self.boundary_min_area.setRange(0.0, 1_000_000.0)
+        self.boundary_min_area.setValue(0.0)
+        self.boundary_min_area.setSuffix(" м²")
+        bl.addRow("Мин. площадь полигона:", self.boundary_min_area)
+        self.boundary_format = QComboBox()
+        self.boundary_format.addItems(["GeoJSON", "WKT", "DXF"])
+        bl.addRow("Формат границы:", self.boundary_format)
+        layout.addWidget(bg)
+
+        # Срезы
+        for i in range(self.MAX_SLICES):
+            self._add_slice_group(i, layout)
+
+        # Кнопки
+        btn_row = QHBoxLayout()
+        b_stats = QPushButton("HAG статистика")
+        b_stats.clicked.connect(self._show_hag_stats)
+        btn_row.addWidget(b_stats)
+        b_save = QPushButton("💾 Сохранить настройки")
+        b_save.clicked.connect(self._save_settings_now)
+        btn_row.addWidget(b_save)
+        b_load = QPushButton("📂 Загрузить настройки")
+        b_load.clicked.connect(self._load_settings_now)
+        btn_row.addWidget(b_load)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        exp_row = QHBoxLayout()
+        b_exp = QPushButton("ЭКСПОРТИРОВАТЬ АКТИВНЫЕ СРЕЗЫ")
+        b_exp.setStyleSheet(
+            "background-color:#0e639c; color:white; "
+            "font-weight:bold; padding:10px;")
+        b_exp.setMinimumHeight(40)
+        b_exp.clicked.connect(self._export_slices)
+        exp_row.addWidget(b_exp, 1)
+        b_open = QPushButton("📁 Папка срезов")
+        b_open.clicked.connect(self._open_slices_dir)
+        exp_row.addWidget(b_open)
+        layout.addLayout(exp_row)
+
+        self.log = LogWidget()
+        self.log.setMaximumHeight(160)
+        layout.addWidget(self.log)
+
+    def _add_slice_group(self, idx, parent_layout):
+        gb = QGroupBox(f"Срез {idx + 1}")
+        gb.setCheckable(True)
+        gb.setChecked(idx == 0)
+        gl = QFormLayout(gb)
+
+        # HAG
+        hag_row = QHBoxLayout()
+        min_spin = QDoubleSpinBox()
+        min_spin.setRange(-100.0, 999.0)
+        min_spin.setValue(0.06)
+        min_spin.setDecimals(2)
+        min_spin.setSuffix(" м")
+        min_spin.setMaximumWidth(90)
+        hag_row.addWidget(QLabel("От:"))
+        hag_row.addWidget(min_spin)
+        max_spin = QDoubleSpinBox()
+        max_spin.setRange(-100.0, 999.0)
+        max_spin.setValue(1.0)
+        max_spin.setDecimals(2)
+        max_spin.setSuffix(" м")
+        max_spin.setMaximumWidth(90)
+        hag_row.addWidget(QLabel("До:"))
+        hag_row.addWidget(max_spin)
+        hag_row.addStretch()
+        gl.addRow("HAG:", hag_row)
+
+        # Mode
+        mode_combo = QComboBox()
+        mode_combo.addItems([
+            "0 — Все точки над землёй",
+            "1 — По выбранным классам ASPRS",
+            "2 — Сечения рельефа (по земле)",
+        ])
+        gl.addRow("Режим:", mode_combo)
+
+        # Classes
+        classes_widget = QWidget()
+        cw = QVBoxLayout(classes_widget)
+        cw.setContentsMargins(0, 0, 0, 0)
+        cr = QHBoxLayout()
+        cr.addWidget(QLabel("Классы:"))
+        classes_edit = QLineEdit("2, 6")
+        classes_edit.setPlaceholderText("напр. 2, 6, 11")
+        cr.addWidget(classes_edit, 1)
+        cw.addLayout(cr)
+        ch = QLabel("2=земля 6=здания 3-5=растит. 9=вода 11=дороги")
+        ch.setStyleSheet("color:#808080; font-size:9px;")
+        cw.addWidget(ch)
+        gl.addRow(classes_widget)
+        classes_widget.setVisible(False)
+
+        # Sections
+        sec_widget = QWidget()
+        sw = QVBoxLayout(sec_widget)
+        sw.setContentsMargins(0, 0, 0, 0)
+        step_row = QHBoxLayout()
+        step_row.addWidget(QLabel("Шаг:"))
+        step_spin = QDoubleSpinBox()
+        step_spin.setRange(0.05, 100.0)
+        step_spin.setValue(0.5)
+        step_spin.setSuffix(" м")
+        step_spin.setDecimals(2)
+        step_row.addWidget(step_spin)
+        sw.addLayout(step_row)
+        range_row = QHBoxLayout()
+        range_row.addWidget(QLabel("Режим:"))
+        range_combo = QComboBox()
+        range_combo.addItems([
+            "Строго на уровне (±step/2)",
+            "Диапазон −/+",
+        ])
+        range_row.addWidget(range_combo, 1)
+        sw.addLayout(range_row)
+        range_lo_row = QHBoxLayout()
+        range_lo_row.addWidget(QLabel("−:"))
+        range_lo = QDoubleSpinBox()
+        range_lo.setRange(0.0, 50.0)
+        range_lo.setValue(0.25)
+        range_lo.setSuffix(" м")
+        range_lo.setDecimals(2)
+        range_lo_row.addWidget(range_lo)
+        range_lo_row.addWidget(QLabel("+:"))
+        range_hi = QDoubleSpinBox()
+        range_hi.setRange(0.0, 50.0)
+        range_hi.setValue(0.25)
+        range_hi.setSuffix(" м")
+        range_hi.setDecimals(2)
+        range_lo_row.addWidget(range_hi)
+        range_lo_row.addStretch()
+        sw.addLayout(range_lo_row)
+        single_file_cb = QCheckBox("Все сечения в один многостраничный TIFF")
+        sw.addWidget(single_file_cb)
+        gl.addRow(sec_widget)
+        sec_widget.setVisible(False)
+
+        def _upd_vis(midx):
+            classes_widget.setVisible(midx == 1)
+            sec_widget.setVisible(midx == 2)
+        mode_combo.currentIndexChanged.connect(_upd_vis)
+
+        # Format
+        fmt_combo = QComboBox()
+        fmt_combo.addItems([
+            "GeoTIFF (1-бит B/W прозрачный)",
+            "LAS (копия источника)",
+        ])
+        gl.addRow("Формат:", fmt_combo)
+
+        # Shape + pixel
+        shape_widget = QWidget()
+        shl = QFormLayout(shape_widget)
+        shl.setContentsMargins(0, 0, 0, 0)
+        shape_combo = QComboBox()
+        shape_combo.addItems(["Квадратный", "Круглый"])
+        shl.addRow("Форма пикс.:", shape_combo)
+        px_row = QHBoxLayout()
+        px_x = QDoubleSpinBox()
+        px_x.setRange(0.01, 5.0)
+        px_x.setValue(0.10)
+        px_x.setDecimals(2)
+        px_x.setSuffix(" м")
+        px_x.setMaximumWidth(80)
+        px_row.addWidget(QLabel("X:"))
+        px_row.addWidget(px_x)
+        px_y = QDoubleSpinBox()
+        px_y.setRange(0.01, 5.0)
+        px_y.setValue(0.10)
+        px_y.setDecimals(2)
+        px_y.setSuffix(" м")
+        px_y.setMaximumWidth(80)
+        px_row.addWidget(QLabel("Y:"))
+        px_row.addWidget(px_y)
+        px_row.addStretch()
+        shl.addRow("Пиксель:", px_row)
+        gl.addRow(shape_widget)
+
+        def _upd_fmt(fidx):
+            shape_widget.setVisible(fidx == 0)
+        fmt_combo.currentIndexChanged.connect(_upd_fmt)
+
+        # Name
+        name_edit = QLineEdit(f"slice_{idx + 1}")
+        gl.addRow("Имя:", name_edit)
+
+        self._slices.append({
+            "group": gb, "min": min_spin, "max": max_spin,
+            "mode": mode_combo, "classes_edit": classes_edit,
+            "step": step_spin, "range_mode": range_combo,
+            "range_lo": range_lo, "range_hi": range_hi,
+            "sections_single": single_file_cb,
+            "format": fmt_combo, "shape": shape_combo,
+            "px_x": px_x, "px_y": px_y, "name": name_edit,
+        })
+        parent_layout.addWidget(gb)
+
+    # ── Настройки: load/save ────────────────────────────────
+    def _load_from_settings(self):
+        s = self._settings
+        paths = s.get("source_paths", [])
+        for p in paths:
+            self.src_list.addItem(p)
+        if paths:
+            self.src_path.setText(paths[0])
+            if len(paths) > 1:
+                self.src_mode_combo.setCurrentIndex(1)
+        mode = s.get("source_mode", "single")
+        if mode == "dir":
+            self.src_mode_combo.setCurrentIndex(2)
+        elif mode == "files":
+            self.src_mode_combo.setCurrentIndex(1)
+        self.in_epsg.setText(s.get("in_epsg", ""))
+        self.out_epsg.setText(s.get("out_epsg", ""))
+        b = s.get("boundary", {})
+        self.boundary_enable.setChecked(bool(b.get("enable", False)))
+        self.boundary_holes.setChecked(bool(b.get("holes", True)))
+        self.boundary_min_hole.setValue(float(b.get("min_hole_area", 100.0)))
+        self.boundary_concavity.setValue(float(b.get("concavity", 50.0)))
+        self.boundary_min_area.setValue(float(b.get("min_area", 0.0)))
+        self.boundary_format.setCurrentIndex(int(b.get("format", 0)))
+        for i in range(self.MAX_SLICES):
+            self._apply_slice_cfg(i, s.slice_cfg(i))
+
+    def _apply_slice_cfg(self, idx, cfg):
+        if idx >= len(self._slices):
+            return
+        sl = self._slices[idx]
+        try:
+            sl["group"].setChecked(bool(cfg.get("enabled", idx == 0)))
+            sl["min"].setValue(float(cfg.get("hag_min", 0.06)))
+            sl["max"].setValue(float(cfg.get("hag_max", 1.0)))
+            sl["mode"].setCurrentIndex(int(cfg.get("mode", 0)))
+            cls = cfg.get("classes", [2, 6])
+            sl["classes_edit"].setText(", ".join(str(c) for c in cls))
+            sl["step"].setValue(float(cfg.get("step", 0.5)))
+            sl["range_lo"].setValue(float(cfg.get("range_lo", 0.25)))
+            sl["range_hi"].setValue(float(cfg.get("range_hi", 0.25)))
+            rm = cfg.get("range_mode", "strict")
+            sl["range_mode"].setCurrentIndex(1 if rm == "range" else 0)
+            sl["sections_single"].setChecked(
+                bool(cfg.get("sections_single_file", False)))
+            sl["format"].setCurrentIndex(int(cfg.get("format", 0)))
+            sh = cfg.get("shape", "square")
+            sl["shape"].setCurrentIndex(1 if sh == "round" else 0)
+            sl["px_x"].setValue(float(cfg.get("px_x", 0.10)))
+            sl["px_y"].setValue(float(cfg.get("px_y", 0.10)))
+            sl["name"].setText(str(cfg.get("name", f"slice_{idx+1}")))
+        except Exception:
+            pass
+
+    def _collect_settings(self):
+        paths = [self.src_list.item(i).text()
+                 for i in range(self.src_list.count())]
+        if not paths and self.src_path.text().strip():
+            paths = [self.src_path.text().strip()]
+        self._settings.set("source_paths", paths)
+        mi = self.src_mode_combo.currentIndex()
+        self._settings.set("source_mode",
+                           ["single", "files", "dir"][mi])
+        self._settings.set("in_epsg", self.in_epsg.text().strip())
+        self._settings.set("out_epsg", self.out_epsg.text().strip())
+        self._settings.set("boundary", {
+            "enable": self.boundary_enable.isChecked(),
+            "holes": self.boundary_holes.isChecked(),
+            "min_hole_area": self.boundary_min_hole.value(),
+            "concavity": self.boundary_concavity.value(),
+            "min_area": self.boundary_min_area.value(),
+            "format": self.boundary_format.currentIndex(),
+        })
+        for i, sl in enumerate(self._slices):
+            classes = self._parse_classes(sl["classes_edit"].text())
+            self._settings.update_slice(
+                i,
+                enabled=sl["group"].isChecked(),
+                hag_min=sl["min"].value(),
+                hag_max=sl["max"].value(),
+                mode=sl["mode"].currentIndex(),
+                classes=classes,
+                step=sl["step"].value(),
+                range_lo=sl["range_lo"].value(),
+                range_hi=sl["range_hi"].value(),
+                range_mode=("range"
+                            if sl["range_mode"].currentIndex() == 1
+                            else "strict"),
+                format=sl["format"].currentIndex(),
+                shape=("round" if sl["shape"].currentIndex() == 1
+                       else "square"),
+                px_x=sl["px_x"].value(),
+                px_y=sl["px_y"].value(),
+                name=sl["name"].text().strip() or f"slice_{i+1}",
+                sections_single_file=sl["sections_single"].isChecked(),
+            )
+
+    def _save_settings_now(self):
+        self._collect_settings()
+        self._settings.save()
+        self.log.log(f"Настройки: {self._settings.path}", "SUCCESS")
+
+    def _load_settings_now(self):
+        self._settings.load()
+        self._load_from_settings()
+        self.log.log("Настройки загружены", "SUCCESS")
+
+    # ── Источники ───────────────────────────────────────────
+    def _browse_src_file(self):
+        p, _ = QFileDialog.getOpenFileName(
+            self, "LAS", str(WORKSPACE),
+            "LAS/LAZ (*.las *.laz);;All Files (*)")
+        if p:
+            self.src_path.setText(p)
+            self.src_list.clear()
+            self.src_list.addItem(p)
+            self.src_mode_combo.setCurrentIndex(0)
+
+    def _browse_src_files(self):
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "LAS (можно несколько)", str(WORKSPACE),
+            "LAS/LAZ (*.las *.laz);;All Files (*)")
+        if files:
+            self.src_mode_combo.setCurrentIndex(1)
+            self.src_path.setText(f"{len(files)} файл(ов)")
+            for f in files:
+                existing = [self.src_list.item(i).text()
+                            for i in range(self.src_list.count())]
+                if f not in existing:
+                    self.src_list.addItem(f)
+
+    def _browse_src_dir(self):
+        d = QFileDialog.getExistingDirectory(
+            self, "Папка с LAS", str(WORKSPACE))
+        if d:
+            self.src_mode_combo.setCurrentIndex(2)
+            self.src_path.setText(d)
+            try:
+                found = sorted(
+                    list(Path(d).rglob("*.las"))
+                    + list(Path(d).rglob("*.laz")))
+                self.src_list.clear()
+                for f in found:
+                    self.src_list.addItem(str(f))
+                self.log.log(
+                    f"Найдено {len(found)} LAS в {d}", "SUCCESS")
+            except Exception as e:
+                self.log.log(f"Ошибка сканирования: {e}", "ERROR")
+
+    def _add_files_to_list(self):
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "Добавить LAS", str(WORKSPACE),
+            "LAS/LAZ (*.las *.laz);;All Files (*)")
+        for f in files:
+            existing = [self.src_list.item(i).text()
+                        for i in range(self.src_list.count())]
+            if f not in existing:
+                self.src_list.addItem(f)
+        if files:
+            self.src_mode_combo.setCurrentIndex(1)
+
+    def _remove_from_list(self):
+        for it in self.src_list.selectedItems():
+            self.src_list.takeItem(self.src_list.row(it))
+
+    def _use_last_m1(self):
+        try:
+            cands = sorted(
+                TRAINING_OUTPUT_DIR.glob("*/m1_classified.las"),
+                key=lambda p: p.stat().st_mtime, reverse=True)
+            if not cands:
+                cands = sorted(
+                    TRAINING_OUTPUT_DIR.glob(
+                        "pipeline_*/**/m1_classified.las"),
+                    key=lambda p: p.stat().st_mtime, reverse=True)
+            if cands:
+                self.src_path.setText(str(cands[0]))
+                self.src_list.clear()
+                self.src_list.addItem(str(cands[0]))
+                self.src_mode_combo.setCurrentIndex(0)
+                self.log.log(f"M1: {cands[0].name}", "SUCCESS")
+            else:
+                self.log.log("m1_classified.las не найден", "WARNING")
+        except Exception as e:
+            self.log.log(f"Ошибка поиска M1: {e}", "ERROR")
+
+    def _open_slices_dir(self):
+        d = SLICES_DIR
+        d.mkdir(exist_ok=True)
+        try:
+            subprocess.Popen(["xdg-open", str(d)])
+        except Exception as e:
+            self.log.log(f"Не открыть: {e}", "ERROR")
+
+    def _collect_source_files(self):
+        files = []
+        mode = self.src_mode_combo.currentIndex()
+        if mode == 0:
+            p = self.src_path.text().strip()
+            if p and Path(p).exists():
+                files = [p]
+        elif mode == 1:
+            files = [self.src_list.item(i).text()
+                     for i in range(self.src_list.count())]
+        elif mode == 2:
+            d = self.src_path.text().strip()
+            if d and Path(d).is_dir():
+                files = sorted(
+                    [str(f) for f in Path(d).rglob("*.las")]
+                    + [str(f) for f in Path(d).rglob("*.laz")])
+        for i in range(self.src_list.count()):
+            t = self.src_list.item(i).text()
+            if t not in files:
+                files.append(t)
+        return [f for f in files if Path(f).exists()]
+
+    @staticmethod
+    def _parse_classes(txt):
+        out = []
+        for p in (txt or "").replace(";", ",").split(","):
+            p = p.strip()
+            if p.isdigit():
+                c = int(p)
+                if 0 <= c <= 255:
+                    out.append(c)
+        return out
+
+    # ── HAG ─────────────────────────────────────────────────
+    @staticmethod
+    def _compute_hag(x, y, z, ground_mask):
+        from city3d_backend.core import idw
+        xyz = np.column_stack([x, y, z]).astype(np.float64)
+        origin = xyz.min(axis=0)
+        xyz -= origin
+        ground_z, valid = idw(xyz[:, :2], xyz[ground_mask, :2], xyz[ground_mask, 2], 5.0)
+        return xyz[:, 2] - ground_z, ground_z + origin[2]
+
+    def _show_hag_stats(self):
+        files = self._collect_source_files()
+        if not files:
+            QMessageBox.warning(self, "Ошибка", "Укажите LAS")
+            return
+        self.log.log(f"Анализ: {Path(files[0]).name}", "INFO")
+        try:
+            import laspy
+            las = laspy.read(files[0])
+            x = np.asarray(las.x)
+            y = np.asarray(las.y)
+            z = np.asarray(las.z)
+            cls = np.asarray(las.classification)
+            n = len(x)
+            uniq, cnt = np.unique(cls, return_counts=True)
+            self.log.log("Классы:", "INFO")
+            for cc, nn in zip(uniq, cnt):
+                nm = ASPRS_CLASSES.get(int(cc), f"cls_{cc}")
+                self.log.log(
+                    f"   {int(cc):3d} {nm:35s} {int(nn):>12,}", "INFO")
+            gm = cls == 2
+            if gm.sum() < 100:
+                self.log.log(f"Мало класса 2: {int(gm.sum())}", "ERROR")
+                return
+            self.log.log("HAG (IDW, 4 соседа)...", "INFO")
+            hag, _ = self._compute_hag(x, y, z, gm)
+            self.log.log(
+                f"HAG: min={hag.min():.2f} p5="
+                f"{np.percentile(hag, 5):.2f} med="
+                f"{np.median(hag):.2f} p95="
+                f"{np.percentile(hag, 95):.2f} max={hag.max():.2f}",
+                "SUCCESS")
+            edges = [-100, -10, -1, 0, 0.06, 0.5, 1, 2, 3, 5,
+                     8, 12, 20, 30, 50, 100, 999]
+            for i in range(len(edges) - 1):
+                lo, hi = edges[i], edges[i + 1]
+                m = ((hag >= lo) & (hag < hi)).sum()
+                pct = 100 * m / n
+                bar = "#" * int(pct / 2)
+                self.log.log(
+                    f"   {lo:7.2f}-{hi:6.2f}: {int(m):>12,} "
+                    f"({pct:5.1f}%) {bar}", "INFO")
+        except Exception as e:
+            import traceback
+            self.log.log(f"Ошибка: {e}", "ERROR")
+            self.log.log(traceback.format_exc(), "ERROR")
+
+    # ── Загрузка всех источников ────────────────────────────
+    def _load_all_sources(self, emit_log, emit_progress, files):
+        import laspy
+        from pyproj import CRS, Transformer
+
+        in_epsg_txt = self._slice_snapshot["in_epsg"].text().strip()
+        out_epsg_txt = self._slice_snapshot["out_epsg"].text().strip()
+        in_epsg = None
+        if in_epsg_txt:
+            dig = "".join(c for c in in_epsg_txt if c.isdigit())
+            in_epsg = int(dig) if dig else None
+        out_epsg = None
+        if out_epsg_txt:
+            dig = "".join(c for c in out_epsg_txt if c.isdigit())
+            out_epsg = int(dig) if dig else None
+
+        all_x, all_y, all_z, all_c, all_hag = [], [], [], [], []
+        self._slice_sources = []
+        source_crs = None
+        offset = 0
+        for fi, fp in enumerate(files):
+            las = laspy.read(fp)
+            crs = las.header.parse_crs()
+            if crs is None and in_epsg:
+                crs = CRS.from_epsg(in_epsg)
+            if crs is None or not crs.is_projected:
+                raise ValueError("Для срезов нужен подтверждённый проекционный CRS; EPSG не угадывается")
+            if source_crs is not None and source_crs != crs:
+                raise ValueError("Сначала приведите источники срезов к одному CRS")
+            source_crs = crs
+            if out_epsg and crs.to_epsg() != out_epsg:
+                raise ValueError("Перепроецирование срезов выполняйте отдельно с контролем атрибутов")
+            n = len(las.points)
+            self._slice_sources.append((fp, offset, offset+n))
+            offset += n
+            all_x.append(np.asarray(las.x)); all_y.append(np.asarray(las.y)); all_z.append(np.asarray(las.z))
+            all_c.append(np.asarray(las.classification))
+            all_hag.append(np.asarray(las.c3_hag) if "c3_hag" in las.point_format.dimension_names else None)
+            emit_progress(int(25*(fi+1)/len(files)))
+        return {"x": np.concatenate(all_x), "y": np.concatenate(all_y), "z": np.concatenate(all_z),
+                "cls": np.concatenate(all_c), "epsg": source_crs.to_epsg(),
+                "hag": np.concatenate(all_hag) if all(h is not None for h in all_hag) else None}
+
+    def _write_preserved_slice(self, emit_log, out, selection):
+        import laspy, copy
+        from city3d_backend.core import check
+        for fi, (source, start, end) in enumerate(self._slice_sources):
+            check(lambda: QThread.currentThread().isInterruptionRequested())
+            selected = selection[start:end]
+            if not selected.any():
+                continue
+            target = Path(out)
+            if len(self._slice_sources) > 1:
+                target = target.with_name(target.stem + f"_src{fi+1}" + target.suffix)
+            original = laspy.read(source)
+            las = laspy.LasData(copy.deepcopy(original.header), points=original.points[selected].copy())
+            las.evlrs = copy.deepcopy(original.evlrs)
+            tmp = target.with_suffix(".tmp.las")
+            las.write(tmp)
+            os.replace(tmp, target)
+            emit_log(f"LAS: {target.name}, исходные измерения сохранены", "SUCCESS")
+
+    # ── Границы ─────────────────────────────────────────────
+    def _create_boundary(self, emit_log, pts_xyz, epsg, out_dir):
+        if not self._slice_snapshot["boundary_enable"].isChecked():
+            return None
+        try:
+            from shapely.geometry import Polygon
+            from shapely import wkt as shp_wkt
+        except ImportError:
+            emit_log("Нужен shapely", "ERROR")
+            return None
+
+        conc = self._slice_snapshot["boundary_concavity"].value()
+        holes_on = self._slice_snapshot["boundary_holes"].isChecked()
+        min_area = self._slice_snapshot["boundary_min_area"].value()
+        emit_log(f"Boundary: concavity={conc} м, holes="
+                 f"{'да' if holes_on else 'нет'}", "INFO")
+
+        geom = None
+        # PDAL
+        try:
+            import subprocess as _sp
+            import laspy
+            tmp = out_dir / "_boundary_in.las"
+            header = laspy.LasHeader(point_format=3, version="1.4")
+            header.offsets = pts_xyz.min(axis=0)
+            header.scales = np.array([0.001, 0.001, 0.001])
+            las = laspy.LasData(header)
+            las.x = pts_xyz[:, 0]
+            las.y = pts_xyz[:, 1]
+            las.z = pts_xyz[:, 2]
+            las.write(str(tmp))
+            pipeline = {"pipeline": [
+                {"type": "readers.las", "filename": str(tmp)},
+                {"type": "filters.hexbin",
+                 "edge_size": float(conc),
+                 "holes": bool(holes_on)},
+                {"type": "writers.text",
+                 "filename": str(out_dir / "_boundary.wkt"),
+                 "format": "wkt", "order": "X,Y"}
+            ]}
+            pf = out_dir / "_boundary_pipeline.json"
+            pf.write_text(json.dumps(pipeline, indent=2))
+            r = _sp.run(["pdal", "pipeline", str(pf)],
+                        capture_output=True, text=True, timeout=300)
+            if r.returncode == 0 and (out_dir / "_boundary.wkt").exists():
+                txt = (out_dir / "_boundary.wkt").read_text()
+                if "POLYGON" in txt:
+                    geom = shp_wkt.loads(txt)
+                    emit_log("PDAL hexbin: OK", "SUCCESS")
+            for f in (tmp, pf):
+                try: f.unlink()
+                except Exception: pass
+        except FileNotFoundError:
+            emit_log("PDAL не найден — fallback", "WARNING")
+        except Exception as e:
+            emit_log(f"PDAL: {e}", "WARNING")
+
+        if geom is None:
+            try:
+                import alphashape
+                n = len(pts_xyz)
+                sample = (pts_xyz[np.random.choice(n, 50_000,
+                                                   replace=False), :2]
+                          if n > 50_000 else pts_xyz[:, :2])
+                geom = alphashape.alphashape(sample, 1.0 / max(conc, 1.0))
+                emit_log("alphashape: OK", "SUCCESS")
+            except ImportError:
+                from scipy.spatial import ConvexHull
+                sample = pts_xyz[:, :2]
+                if len(sample) > 100_000:
+                    sample = sample[np.random.choice(
+                        len(sample), 100_000, replace=False)]
+                hull = ConvexHull(sample)
+                geom = Polygon(sample[hull.vertices])
+                emit_log("ConvexHull (без дыр)", "WARNING")
+
+        if geom is None or geom.is_empty:
+            emit_log("Граница не построена", "ERROR")
+            return None
+        if min_area > 0 and geom.area < min_area:
+            emit_log(f"Площадь {geom.area:.0f} < {min_area} м²", "WARNING")
+            return None
+
+        fmt = self._slice_snapshot["boundary_format"].currentText()
+        name = self._slices[0]["name"].text().strip() or "boundary"
+        from datetime import datetime as _dt
+        ts = _dt.now().strftime("%Y%m%d-%H%M%S")
+        base = out_dir / f"{ts}_boundary"
+
+        if fmt == "GeoJSON":
+            feat = {
+                "type": "Feature",
+                "properties": {
+                    "area_m2": float(geom.area),
+                    "n_holes": (len(geom.interiors) if holes_on else 0),
+                    "epsg": int(epsg),
+                },
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [list(geom.exterior.coords)]
+                    + ([list(h.coords) for h in geom.interiors]
+                       if holes_on else []),
+                },
+            }
+            out = base.with_suffix(".geojson")
+            out.write_text(json.dumps(
+                {"type": "FeatureCollection", "features": [feat]},
+                ensure_ascii=False, indent=2), encoding="utf-8")
+        elif fmt == "WKT":
+            out = base.with_suffix(".wkt")
+            out.write_text(geom.wkt, encoding="utf-8")
+        else:
+            try:
+                import ezdxf
+                doc = ezdxf.new("R2010")
+                msp = doc.modelspace()
+                msp.add_lwpolyline(list(geom.exterior.coords))
+                if holes_on:
+                    for interior in geom.interiors:
+                        msp.add_lwpolyline(list(interior.coords))
+                out = base.with_suffix(".dxf")
+                doc.saveas(str(out))
+            except ImportError:
+                emit_log("Нужен ezdxf для DXF", "WARNING")
+                return None
+
+        emit_log(f"Boundary → {out.name} "
+                 f"(площадь {geom.area:.0f} м², дыр "
+                 f"{len(geom.interiors) if holes_on else 0})",
+                 "SUCCESS")
+        return out
+
+    # ── Экспорт срезов ──────────────────────────────────────
+    def _export_slices(self):
+        files = self._collect_source_files()
+        if not files:
+            QMessageBox.warning(self, "Ошибка", "Укажите LAS-файл(ы)")
+            return
+        active = []
+        for i, sl in enumerate(self._slices):
+            if not sl["group"].isChecked():
+                continue
+            if sl["min"].value() >= sl["max"].value():
+                QMessageBox.warning(
+                    self, "Ошибка", f"Срез {i+1}: От >= До")
+                return
+            active.append((i, {key: FrozenControl.capture(value) if isinstance(value, QWidget) else value for key, value in sl.items()}))
+        if not active:
+            QMessageBox.warning(
+                self, "Ошибка", "Активируйте хотя бы один срез")
+            return
+        self._collect_settings()
+        self._settings.save()
+        self._slice_snapshot = {name: FrozenControl.capture(getattr(self, name)) for name in
+            ("in_epsg", "out_epsg", "boundary_enable", "boundary_concavity", "boundary_holes", "boundary_min_area", "boundary_format")
+            if hasattr(self, name)}
+        self._worker = WorkerThread(
+            self._export_slices_task, files, active)
+        self._worker.log_signal.connect(self.log.log)
+        self._worker.task_done.connect(self._on_slices_done)
+        self._worker.start()
+
+    def _on_slices_done(self, ok):
+        self.log.log("Срезы готовы" if ok else "Ошибка срезов",
+                     "SUCCESS" if ok else "ERROR")
+        try:
+            exp = self.main_window.tabs.widget(5)
+            if hasattr(exp, "refresh_preview_list"):
+                exp.refresh_preview_list()
+        except Exception:
+            pass
+
+    def _export_slices_task(self, emit_log, emit_progress, files, active):
+        try:
+            from datetime import datetime as _dt
+            out_dir = SLICES_DIR
+            out_dir.mkdir(parents=True, exist_ok=True)
+            emit_log(f"Файлов: {len(files)}, срезов: {len(active)}",
+                     "INFO")
+
+            data = self._load_all_sources(emit_log, emit_progress, files)
+            x, y, z, cls = data["x"], data["y"], data["z"], data["cls"]
+            epsg = data["epsg"]
+            emit_log(f"Точек: {len(x):,}, EPSG:{epsg}", "SUCCESS")
+
+            gm = cls == 2
+            if data.get("hag") is None and not gm.any():
+                emit_log(f"Мало класса 2: {int(gm.sum())}", "ERROR")
+                return False
+            emit_log("HAG...", "INFO")
+            emit_progress(30)
+            hag = data.get("hag")
+            if hag is None:
+                hag, _ = self._compute_hag(x, y, z, gm)
+            emit_log(f"HAG [{hag.min():.2f}, {hag.max():.2f}]", "SUCCESS")
+            emit_progress(45)
+
+            if self._slice_snapshot["boundary_enable"].isChecked():
+                try:
+                    self._create_boundary(
+                        emit_log, np.column_stack([x, y, z]),
+                        epsg, out_dir)
+                except Exception as e:
+                    emit_log(f"Boundary: {e}", "WARNING")
+            emit_progress(55)
+
+            ts = _dt.now().strftime("%Y%m%d-%H%M%S")
+            n_ok = 0
+            n_steps = len(active)
+            for si, (s_idx, sl) in enumerate(active):
+                emit_progress(55 + int(40 * si / max(n_steps, 1)))
+                nm = sl["name"].text().strip() or f"slice_{s_idx+1}"
+                mode = sl["mode"].currentIndex()
+                emit_log("─" * 50, "INFO")
+                emit_log(f"Срез {s_idx+1} [{nm}] mode={mode}", "INFO")
+                try:
+                    if mode == 2:
+                        cnt = self._export_relief_sections(
+                            emit_log, out_dir, ts, nm,
+                            x, y, z, hag, cls, epsg, sl)
+                    else:
+                        cnt = self._export_regular_slice(
+                            emit_log, out_dir, ts, nm,
+                            x, y, z, cls, hag, epsg, sl)
+                    if cnt > 0:
+                        n_ok += 1
+                except Exception as e:
+                    import traceback
+                    emit_log(f"  Ошибка среза {s_idx+1}: {e}", "ERROR")
+                    emit_log(traceback.format_exc(), "ERROR")
+
+            emit_progress(100)
+            emit_log("─" * 50, "INFO")
+            emit_log(f"ИТОГО: {n_ok}/{n_steps} → {out_dir}", "SUCCESS")
+            return n_ok > 0
+        except Exception as e:
+            import traceback
+            emit_log(f"Критическая: {e}", "ERROR")
+            emit_log(traceback.format_exc(), "ERROR")
+            return False
+
+    def _export_regular_slice(self, emit_log, out_dir, ts, name,
+                              x, y, z, cls, hag, epsg, sl):
+        min_h = sl["min"].value()
+        max_h = sl["max"].value()
+        mode = sl["mode"].currentIndex()
+        fmt_idx = sl["format"].currentIndex()
+        sel = (hag >= min_h) & (hag < max_h)
+        class_info = ""
+        if mode == 1:
+            classes = self._parse_classes(sl["classes_edit"].text())
+            if not classes:
+                emit_log("  Классы не заданы", "WARNING")
+                return 0
+            sel = sel & np.isin(cls, list(classes))
+            class_info = f" (классы {sorted(classes)})"
+        n_sel = int(sel.sum())
+        emit_log(f"  {name}: точек {n_sel:,}{class_info}", "INFO")
+        if n_sel < 10:
+            emit_log("  ПРОПУСК (< 10)", "WARNING")
+            return 0
+        sx, sy, sz = x[sel], y[sel], z[sel]
+        if fmt_idx == 1:
+            out = out_dir / f"{ts}_{name}.las"
+            self._write_preserved_slice(emit_log, out, sel)
+        else:
+            out = out_dir / f"{ts}_{name}.tif"
+            self._write_slice_geotiff(
+                emit_log, out, sx, sy, epsg,
+                sl["px_x"].value(), sl["px_y"].value(),
+                sl["shape"].currentIndex() == 1)
+        return 1
+
+    def _export_relief_sections(self, emit_log, out_dir, ts, name,
+                                x, y, z, hag, cls, epsg, sl):
+        step = sl["step"].value()
+        rng_mode = sl["range_mode"].currentIndex()
+        rng_lo = sl["range_lo"].value()
+        rng_hi = sl["range_hi"].value()
+        fmt_idx = sl["format"].currentIndex()
+        z_min = float(np.nanmin(hag))
+        z_max = float(np.nanmax(hag))
+        if z_max <= z_min:
+            emit_log(f"  {name}: плоский рельеф", "WARNING")
+            return 0
+        levels = np.arange(
+            np.floor(z_min / step) * step,
+            np.ceil(z_max / step) * step + step,
+            step)
+        emit_log(f"  {name}: {len(levels)} сечений (шаг {step} м, "
+                 f"HAG [{z_min:.2f}, {z_max:.2f}])", "INFO")
+        px_x = sl["px_x"].value()
+        px_y = sl["px_y"].value()
+        shape_round = sl["shape"].currentIndex() == 1
+        total = 0
+        for lev in levels:
+            if rng_mode == 0:
+                half = step / 2.0
+                m = (hag >= lev - half) & (hag < lev + half)
+            else:
+                m = (hag >= lev - rng_lo) & (hag <= lev + rng_hi)
+            n_m = int(m.sum())
+            if n_m < 10:
+                continue
+            sx, sy, sz = x[m], y[m], z[m]
+            lv = f"{name}_z{lev:+.2f}".replace(
+                "+", "p").replace("-", "m").replace(".", "_")
+            if fmt_idx == 1:
+                out = out_dir / f"{ts}_{lv}.las"
+                self._write_preserved_slice(emit_log, out, m)
+            else:
+                out = out_dir / f"{ts}_{lv}.tif"
+                self._write_slice_geotiff(
+                    emit_log, out, sx, sy, epsg,
+                    px_x, px_y, shape_round)
+            total += 1
+        emit_log(f"  {name}: {total} сечений сохранено", "SUCCESS")
+        return total
+
+    # ── Писатели ────────────────────────────────────────────
+    @staticmethod
+    def _write_slice_las(emit_log, out_path, sx, sy, sz, epsg):
+        import laspy
+        from pyproj import CRS
+        n = len(sx)
+        header = laspy.LasHeader(point_format=3, version="1.4")
+        try:
+            header.point_count = int(n)
+        except Exception:
+            pass
+        pts = np.column_stack([sx, sy, sz])
+        header.offsets = pts.min(axis=0)
+        header.scales = np.array([0.001, 0.001, 0.001])
+        try:
+            crs = CRS.from_epsg(int(epsg))
+            try: header.add_crs(crs)
+            except Exception: pass
+        except Exception:
+            pass
+        las = laspy.LasData(header)
+        las.x = sx; las.y = sy; las.z = sz
+        las.classification = np.zeros(n, dtype=np.uint8)
+        las.write(str(out_path))
+        try:
+            mb = out_path.stat().st_size / 1024 / 1024
+            emit_log(f"  LAS: {out_path.name} ({mb:.1f} МБ)", "SUCCESS")
+        except Exception:
+            pass
+
+    @staticmethod
+    def _write_slice_geotiff(emit_log, out_path, x, y, epsg,
+                             px_x, px_y, shape_round):
+        import rasterio
+        from rasterio.transform import from_origin
+        from pyproj import CRS
+        if len(x) == 0:
+            raise ValueError("Нет точек")
+        x_min = float(x.min()); x_max = float(x.max())
+        y_min = float(y.min()); y_max = float(y.max())
+        cols = max(int(np.ceil((x_max - x_min) / px_x)), 1)
+        rows = max(int(np.ceil((y_max - y_min) / px_y)), 1)
+        if rows * cols > SliceExporterWidget.MAX_RASTER_PIXELS:
+            import math
+            scale = math.sqrt(
+                (rows * cols) /
+                SliceExporterWidget.MAX_RASTER_PIXELS)
+            px_x *= scale; px_y *= scale
+            cols = max(int(np.ceil((x_max - x_min) / px_x)), 1)
+            rows = max(int(np.ceil((y_max - y_min) / px_y)), 1)
+        px = ((x - x_min) / px_x).astype(np.int32)
+        py = ((y_max - y) / px_y).astype(np.int32)
+        valid = (px >= 0) & (px < cols) & (py >= 0) & (py < rows)
+        px = px[valid]; py = py[valid]
+        mask = np.zeros((rows, cols), dtype=np.uint8)
+        mask[py, px] = 1
+        if shape_round:
+            try:
+                from scipy import ndimage
+                struct = np.array(
+                    [[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=bool)
+                mask = ndimage.binary_dilation(
+                    mask.astype(bool), structure=struct).astype(np.uint8)
+            except ImportError:
+                m = mask.copy()
+                m[1:, :] |= mask[:-1, :]
+                m[:-1, :] |= mask[1:, :]
+                m[:, 1:] |= mask[:, :-1]
+                m[:, :-1] |= mask[:, 1:]
+                mask = m
+        gray = np.where(mask == 1, 0, 255).astype(np.uint8)
+        alpha = np.where(mask == 1, 255, 0).astype(np.uint8)
+        transform = from_origin(x_min, y_max, px_x, px_y)
+        try:
+            crs = CRS.from_epsg(int(epsg))
+        except Exception:
+            crs = None
+        meta = {
+            'driver': 'GTiff', 'dtype': 'uint8', 'count': 2,
+            'width': cols, 'height': rows,
+            'transform': transform,
+            'compress': 'DEFLATE', 'zlevel': 9,
+            'tiled': True, 'blockxsize': 256, 'blockysize': 256,
+            'BIGTIFF': 'IF_SAFER',
+            'photometric': 'MINISBLACK',
+            'interleave': 'band',
+            'PREDICTOR': 2,
+            'ALPHA': 'YES',
+            'SPARSE_OK': 'TRUE',
+        }
+        if crs:
+            meta['crs'] = crs
+        with rasterio.open(out_path, 'w', **meta) as dst:
+            dst.write(gray, 1)
+            dst.write(alpha, 2)
+        if crs:
+            out_path.with_suffix(".prj").write_text(
+                crs.to_wkt(), encoding="utf-8")
+        tfw = (f"{px_x:.10f}\n0.0000000000\n0.0000000000\n"
+               f"{-px_y:.10f}\n"
+               f"{x_min + px_x / 2:.10f}\n"
+               f"{y_max - px_y / 2:.10f}\n")
+        out_path.with_suffix(".tfw").write_text(tfw, encoding="utf-8")
+        try:
+            mb = out_path.stat().st_size / 1024 / 1024
+            bpp = out_path.stat().st_size * 8 / max(rows * cols, 1)
+            emit_log(
+                f"  GeoTIFF: {out_path.name} ({mb:.2f} МБ, "
+                f"{rows}×{cols}, {bpp:.2f} бит/пикс., "
+                f"пикс. {px_x:.3f} м)", "SUCCESS")
+        except Exception:
+            pass
+
 
 class ExportTab(QWidget):
     def __init__(self, main_window):
@@ -5195,8 +6326,15 @@ class ExportTab(QWidget):
     def init_ui(self):
         layout = QVBoxLayout()
         splitter = QSplitter(Qt.Horizontal)
+
+        # PATCHED_LAYOUT_FIX: оборачиваем левую колонку в QScrollArea,
+        # иначе панель срезов не помещается и виджеты налезают
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setMinimumWidth(650)  # PATCHED_SINGLE_SCROLL_V3
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
         left = QWidget()
-        left.setMaximumWidth(460)
         ll = QVBoxLayout(left)
 
         g1 = QGroupBox("Формат")
@@ -5216,6 +6354,45 @@ class ExportTab(QWidget):
         g2l.addRow("Имя:", self.name)
         self.use_cropped = QCheckBox("Использовать обрезанное")
         g2l.addRow("", self.use_cropped)
+
+        # PATCHED_CRS_UI: целевой CRS
+        self.target_crs_combo = QComboBox()
+        self.target_crs_combo.addItems([
+            "Не менять (CRS источника)",
+            "EPSG:4326 — WGS 84 (географ.)",
+            "EPSG:32639 — WGS 84 / UTM 39N",
+            "EPSG:32638 — WGS 84 / UTM 38N",
+            "EPSG:3857 — Web Mercator",
+            "EPSG:28410 — Пулково 1942 / Gauss-Kruger CM 57E",
+            "EPSG:5555 — WGS 84 / UTM 39N",
+        ])
+        self.target_crs_combo.setToolTip(
+            "Во что перевести CRS при экспорте")
+        g2l.addRow("Целевой CRS:", self.target_crs_combo)
+
+        # Целевая вертикальная СК
+        self.target_vert_combo = QComboBox()
+        for code, name in VERTICAL_CRS_LIST:
+            self.target_vert_combo.addItem(name, code)
+        self.target_vert_combo.setToolTip(
+            "Целевая система высот")
+        g2l.addRow("Высоты:", self.target_vert_combo)
+
+        # Смещение высот
+        self.export_height_offset = QDoubleSpinBox()
+        self.export_height_offset.setRange(-10000.0, 10000.0)
+        self.export_height_offset.setDecimals(3)
+        self.export_height_offset.setValue(0.0)
+        self.export_height_offset.setToolTip(
+            "Смещение Z при экспорте (м)")
+        g2l.addRow("Δ высот (м):", self.export_height_offset)
+
+        # Показать CRS источника
+        self.export_src_crs = QLabel("—")
+        self.export_src_crs.setStyleSheet(
+            "color: #dcdcaa; font-family: monospace; padding: 2px;")
+        g2l.addRow("CRS источника:", self.export_src_crs)
+
         g2.setLayout(g2l)
         ll.addWidget(g2)
 
@@ -5250,6 +6427,11 @@ class ExportTab(QWidget):
         b_clear = QPushButton("Очистить список")
         b_clear.clicked.connect(self._clear_preview_list)
         bb2.addWidget(b_clear)
+        # PATCHED_EXPORT_UI: удаление старых файлов
+        b_purge = QPushButton("🗑 Удалить старые (>7 дней)")
+        b_purge.setToolTip("Удаляет файлы экспорта старше 7 дней")
+        b_purge.clicked.connect(self._purge_old_exports)
+        bb2.addWidget(b_purge)
         pl.addLayout(bb2)
 
         pg.setLayout(pl)
@@ -5258,19 +6440,59 @@ class ExportTab(QWidget):
         self.log = LogWidget()
         ll.addWidget(self.log)
 
-        splitter.addWidget(left)
+        # PATCHED_SLICE_EXPORTER: панель срезов по HAG
+        try:
+            slice_gb = QGroupBox(
+                "Срезы облака по высоте (HAG)")
+            slice_l = QVBoxLayout(slice_gb)
+            self.slice_widget = SliceExporterWidget(
+                self.main_window)
+            slice_l.addWidget(self.slice_widget)
+            ll.addWidget(slice_gb)
+        except Exception as _e:
+            import traceback
+            print("[WARN] SliceExporterWidget:", _e,
+                  file=sys.stderr)
+            traceback.print_exc()
+            self.slice_widget = None
+
+        # PATCHED_LAYOUT_FIX: завершаем обёртку scroll area
+        left_scroll.setWidget(left)
+        splitter.addWidget(left_scroll)
         self.preview = ExportPreviewViewer()
         splitter.addWidget(self.preview)
-        splitter.setSizes([440, 900])
+        splitter.setSizes([720, 850])  # PATCHED_SINGLE_SCROLL_V3
         layout.addWidget(splitter)
         self.setLayout(layout)
 
         self.refresh_preview_list()
+        # PATCHED_CRS_UI: обновляем отображение CRS источника
+        try:
+            self._refresh_src_crs_label()
+        except Exception:
+            pass
+
+    def _refresh_src_crs_label(self):
+        """Показывает CRS источника в ExportTab. PATCHED_CRS_UI"""
+        cd = getattr(self.main_window, "crs_detector", None)
+        if cd and cd.crs:
+            self.export_src_crs.setText(
+                f"EPSG:{cd.crs} — {cd.crs_description or ''}")
+        else:
+            self.export_src_crs.setText("не определён")
 
     def refresh_preview_list(self):
+        """Обновляет список. По умолчанию показывает ТОЛЬКО свежие
+        файлы (младше 7 дней) чтобы старые ошибочные результаты не
+        мешали. PATCHED_EXPORT_UI"""
+        import time as _t
         current_data = self.file_combo.currentData()
         self.file_combo.blockSignals(True)
         self.file_combo.clear()
+
+        # Фильтр по дате: только свежие (настраивается)
+        max_age_days = 7
+        cutoff = _t.time() - max_age_days * 86400
 
         search_dirs = [WORKSPACE, TRAINING_OUTPUT_DIR]
         for sub in sorted(TRAINING_OUTPUT_DIR.glob("*")):
@@ -5299,6 +6521,26 @@ class ExportTab(QWidget):
                     key = str(p.resolve())
                     if key in seen:
                         continue
+                    # PATCHED_EXPORT_UI: отсекаем старые и пустые
+                    try:
+                        if p.stat().st_mtime < cutoff:
+                            continue
+                        if p.stat().st_size < 100:
+                            continue
+                    except Exception:
+                        continue
+                    # Отсекаем .obj с < 500 треугольников
+                    # (это заглушка от convex_hull)
+                    if ext == ".obj":
+                        try:
+                            with open(p, "r") as f:
+                                n_faces = sum(
+                                    1 for line in f
+                                    if line.startswith("f "))
+                            if n_faces < 100:
+                                continue
+                        except Exception:
+                            pass
                     seen.add(key)
                     found.append(p)
         for p_str in self._exported_files:
@@ -5310,13 +6552,12 @@ class ExportTab(QWidget):
                     found.append(pp)
 
         def key_func(p):
-            ext = p.suffix.lower()
-            if ext == ".geojson":
-                return (0, str(p))
-            if ext in PREVIEW_MESH_EXTS + PREVIEW_CLOUD_EXTS:
-                return (1, str(p))
-            return (2, str(p))
-        found.sort(key=key_func)
+            try:
+                mtime = -p.stat().st_mtime  # свежие — первыми
+            except Exception:
+                mtime = 0
+            return (mtime, str(p))
+        found.sort(key=key_func)  # PATCHED_EXPORT_UI
 
         for p in found:
             label = f"{p.parent.name}/{p.name}  " \
@@ -5338,6 +6579,31 @@ class ExportTab(QWidget):
             self.preview.header.setText(
                 "Файлов для предпросмотра не найдено.\n"
                 "Экспортируйте что-нибудь или нажмите «Открыть файл…».")
+
+
+    def _purge_old_exports(self):
+        """Удаляет файлы старше 7 дней в WORKSPACE."""
+        import time as _t
+        cutoff = _t.time() - 7 * 86400
+        exts = (".obj", ".usda", ".usd", ".gml", ".geojson",
+                ".dxf", ".ifc", ".ply")
+        removed = 0
+        sizes = 0
+        for p in WORKSPACE.glob("*"):
+            if p.is_file() and p.suffix.lower() in exts:
+                try:
+                    if p.stat().st_mtime < cutoff:
+                        sz = p.stat().st_size
+                        p.unlink()
+                        removed += 1
+                        sizes += sz
+                except Exception:
+                    pass
+        self.log.log(
+            f"Удалено старых экспортов: {removed} "
+            f"({sizes/1024/1024:.1f} МБ)", "SUCCESS")
+        self._exported_files.clear()
+        self.refresh_preview_list()
 
     def _clear_preview_list(self):
         self._exported_files.clear()
@@ -5519,18 +6785,30 @@ class ExportTab(QWidget):
             return False
 
     def _on_done(self, ok):
+        """После экспорта — принудительно обновляем список. 
+        PATCHED_EXPORT_UI"""
         if not ok:
             return
         if self._last_output:
             p = Path(self._last_output)
-            if p.exists() and self._last_output not in self._exported_files:
-                self._exported_files.append(self._last_output)
+            if p.exists():
+                if self._last_output not in self._exported_files:
+                    self._exported_files.append(self._last_output)
+                # Дописываем метку вручную, чтобы не фильтровалось по
+                # возрасту (файл только что создан, но всё равно)
+        # Принудительно перечитываем список
         self.refresh_preview_list()
+        # Выбираем последний экспортированный файл
         if self._last_output:
             idx = self.file_combo.findData(self._last_output)
             if idx >= 0:
                 self.file_combo.setCurrentIndex(idx)
+                self._on_preview_file_selected(idx)
+                self.log.log(
+                    f"Предпросмотр открыт: "
+                    f"{Path(self._last_output).name}", "SUCCESS")
             else:
+                # Если фильтр отсеял — открываем напрямую
                 self.preview.show_file(self._last_output)
 
     def export_all(self):
@@ -5568,6 +6846,44 @@ class ReferenceDBTab(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(
             QHeaderView.Stretch)
         layout.addWidget(self.table)
+        # ── Скачивание OSM / SRTM ─────────────────────────────
+        dl_gb = QGroupBox("Скачивание эталонов OSM/SRTM")
+        dl_l = QVBoxLayout(dl_gb)
+        dl_l.addWidget(QLabel(
+            "Источник: файл LAS на вкладке 1 (bbox определяется "
+            "автоматически)."))
+
+        dl_row1 = QHBoxLayout()
+        self.btn_download_osm = QPushButton("🌐 Скачать OSM")
+        self.btn_download_osm.setToolTip(
+            "Buildings / roads / waterways через Overpass API")
+        self.btn_download_osm.clicked.connect(
+            lambda: self._download_external("osm"))
+        dl_row1.addWidget(self.btn_download_osm)
+
+        self.btn_download_srtm = QPushButton("⛰ Скачать SRTM 30m")
+        self.btn_download_srtm.setToolTip(
+            "Скачивает тайл с AWS S3 (в обход blocked-серверов)")
+        self.btn_download_srtm.clicked.connect(
+            lambda: self._download_external("srtm"))
+        dl_row1.addWidget(self.btn_download_srtm)
+
+        self.btn_download_all = QPushButton("⬇ Скачать всё")
+        self.btn_download_all.clicked.connect(
+            lambda: self._download_external("all"))
+        dl_row1.addWidget(self.btn_download_all)
+        dl_row1.addStretch()
+        dl_l.addLayout(dl_row1)
+
+        self.download_log = QTextEdit()
+        self.download_log.setReadOnly(True)
+        self.download_log.setMaximumHeight(100)
+        self.download_log.setFont(QFont("Monospace", 8))
+        self.download_log.setStyleSheet(
+            "background:#1a1a1a; color:#d4d4d4;")
+        dl_l.addWidget(self.download_log)
+        layout.addWidget(dl_gb)
+
         bl = QHBoxLayout()
         b1 = QPushButton("Добавить эталон")
         b1.clicked.connect(self.add_cloud)
@@ -5584,6 +6900,70 @@ class ReferenceDBTab(QWidget):
         layout.addWidget(self.log)
         self.setLayout(layout)
         self.refresh()
+
+
+    # ── Скачивание OSM/SRTM ─────────────────────────────────────
+    def _download_external(self, kind):
+        """kind ∈ {"osm", "srtm", "all"}."""
+        las_path = getattr(self.main_window, "pcd_path", None)
+        if not las_path or not Path(las_path).exists():
+            QMessageBox.warning(
+                self, "Нет исходного файла",
+                "Сначала загрузите LAS на вкладке 1.")
+            return
+
+        self.download_log.clear()
+        self._dl("Старт: " + kind)
+        self._dl(f"Источник: {las_path}")
+
+        worker = WorkerThread(self._download_task, las_path, kind)
+        worker.log_signal.connect(lambda m, lv="INFO":
+                                  self._dl(f"[{lv}] {m}"))
+        worker.task_done.connect(self._on_download_done)
+        worker.start()
+        self._worker = worker
+
+    def _dl(self, msg):
+        from datetime import datetime as _dt
+        ts = _dt.now().strftime("%H:%M:%S")
+        self.download_log.append(f"[{ts}] {msg}")
+        self.download_log.verticalScrollBar().setValue(
+            self.download_log.verticalScrollBar().maximum())
+
+    def _download_task(self, emit_log, emit_progress, las_path, kind):
+        """Запускается в фоновом потоке."""
+        import subprocess
+        from pathlib import Path as _P
+
+        # Используем уже готовый скрипт setup_references_v5.py
+        script = _P.home() / "tools" / "setup_references_v5.py"
+        if not script.exists():
+            emit_log(f"Скрипт не найден: {script}", "ERROR")
+            return False
+
+        emit_log("Запускаю setup_references_v5.py...")
+        try:
+            r = subprocess.run(
+                ["python", str(script), las_path, "--epsg", "32639"],
+                capture_output=True, text=True, timeout=900)
+            for line in r.stdout.splitlines():
+                emit_log(line)
+            if r.returncode != 0:
+                emit_log(f"Код выхода: {r.returncode}", "ERROR")
+                return False
+            emit_log("Готово", "SUCCESS")
+            emit_progress(100)
+            return True
+        except Exception as e:
+            emit_log(f"Ошибка: {e}", "ERROR")
+            return False
+
+    def _on_download_done(self, ok):
+        if ok:
+            self._dl("── УСПЕХ ──")
+            self.refresh()  # обновим таблицу
+        else:
+            self._dl("── ОШИБКА ──")
 
     def add_cloud(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -5641,9 +7021,30 @@ class ReferenceDBTab(QWidget):
                         ORDER BY created_at DESC
                     """)
                     for r in cur.fetchall():
-                        rows.append(("references_clouds",
-                                     r[1], r[2], r[3]))
-                self.status_label.setText("Источник: PostgreSQL")
+                        rows.append(("clouds", r[1], r[2], r[3]))
+                    cur.execute(f"""
+                        SELECT id, name, path, created_at
+                        FROM {hdb.schema_r}.references_gis
+                        ORDER BY created_at DESC
+                    """)
+                    for r in cur.fetchall():
+                        rows.append(("gis", r[1], r[2], r[3]))
+                    cur.execute(f"""
+                        SELECT id, name, path, created_at
+                        FROM {hdb.schema_r}.references_dem
+                        ORDER BY created_at DESC
+                    """)
+                    for r in cur.fetchall():
+                        rows.append(("dem", r[1], r[2], r[3]))
+                    cur.execute(f"""
+                        SELECT id, name, path, created_at
+                        FROM {hdb.schema_r}.references_masks
+                        ORDER BY created_at DESC
+                    """)
+                    for r in cur.fetchall():
+                        rows.append(("masks", r[1], r[2], r[3]))
+                self.status_label.setText(
+                    f"Источник: PostgreSQL ({len(rows)} записей)")
             except Exception as e:
                 self.log.log(f"Ошибка чтения Postgres: {e}", "WARNING")
         if not rows:
@@ -5730,8 +7131,64 @@ class HistoryTab(QWidget):
         self.info.setWordWrap(True)
         layout.addWidget(self.info)
 
+        # ── Сводка по качеству + рекомендации ────────────────────
+        summary_gb = QGroupBox("history_summary_panel — Сводка качества "
+                                "и рекомендации")
+        summary_l = QVBoxLayout(summary_gb)
+        self.summary_table = QTableWidget()
+        self.summary_table.setColumnCount(6)
+        self.summary_table.setHorizontalHeaderLabels([
+            "Метод", "Тип", "Прогонов", "Средний quality",
+            "Лучший quality", "Рекомендация"])
+        self.summary_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch)
+        summary_l.addWidget(self.summary_table)
+        layout.addWidget(summary_gb)
+
         self.setLayout(layout)
         self.reload()
+
+
+    def _refresh_summary(self):
+        """Сводка по качеству обучений + рекомендации."""
+        hdb = getattr(self.main_window, "history_db", None)
+        if not hdb or not hdb.is_available:
+            self.summary_table.setRowCount(0)
+            return
+        try:
+            with hdb.conn.cursor() as cur:
+                cur.execute(f"""
+                    SELECT method, scanning_type, COUNT(*) AS n,
+                           AVG((metrics->>'quality_score')::real) AS avg_q,
+                           MAX((metrics->>'quality_score')::real) AS max_q,
+                           MAX(started_at) AS last_run
+                    FROM {hdb.schema_h}.training_runs
+                    WHERE status='success'
+                    GROUP BY method, scanning_type
+                    ORDER BY method, scanning_type
+                """)
+                rows = cur.fetchall()
+        except Exception as e:
+            self.info.setText(f"Ошибка сводки: {e}")
+            return
+
+        self.summary_table.setRowCount(len(rows))
+        for i, (m, t, n, avg_q, max_q, last) in enumerate(rows):
+            avg_q = avg_q or 0.0
+            max_q = max_q or 0.0
+            if max_q >= 0.7:
+                rec = "✅ ДОСТАТОЧНО — можно двигаться дальше"
+            elif max_q >= 0.4:
+                rec = "⚠ ДОБАВЬТЕ эталонов с другой геометрией"
+            else:
+                rec = "❌ ПЛОХО — проверьте эталоны и параметры"
+            cells = [str(m), str(t or "—"), str(n),
+                     f"{avg_q:.3f}", f"{max_q:.3f}", rec]
+            for j, v in enumerate(cells):
+                self.summary_table.setItem(i, j, QTableWidgetItem(v))
+        self.info.setText(
+            f"История: {len(rows)} комбинаций метод/тип. "
+            f"Обновлено: {datetime.now().strftime('%H:%M:%S')}")
 
     def _current_filters(self):
         m = self.f_method.currentText()
@@ -5771,6 +7228,11 @@ class HistoryTab(QWidget):
             self.table.setItem(i, 8,
                                QTableWidgetItem(str(r["output_dir"])))
         self.info.setText(f"Найдено прогонов: {len(runs)}")
+        # Обновляем сводку
+        try:
+            self._refresh_summary()
+        except Exception as e:
+            self.info.setText(f"{self.info.text()} | сводка: {e}")
 
     def _selected_run(self):
         rows = self.table.selectionModel().selectedRows() \
@@ -5884,6 +7346,623 @@ class HistoryTab(QWidget):
 # Главное окно
 # ============================================================================
 
+
+
+# ═══════════════════════════════════════════════════════════════════
+# PATCHED_SETTINGS_TAB_V2 — вкладка «9. Настройки»
+# ═══════════════════════════════════════════════════════════════════
+
+_NL = chr(10)
+
+
+class SettingsTab(QWidget):
+    """Настройки: директории, БД, Git, объём."""
+
+    SETTINGS_FILE = Path.home() / ".config" / "city3d" / "settings.json"
+
+    def __init__(self, main_window):
+        super().__init__()
+        self.main_window = main_window
+        self._dir_rows = {}
+        self._build_ui()
+        self.refresh_all()
+
+    def _build_ui(self):
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(8, 8, 8, 8)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        layout.setContentsMargins(4, 4, 4, 4)
+
+        # ═════ БЛОК 1: Директории ═════
+        dir_gb = QGroupBox("📁 Директории и папки программы")
+        dir_l = QVBoxLayout(dir_gb)
+        hint = QLabel(
+            "Изменения сохраняются в " + str(self.SETTINGS_FILE)
+            + ". Пути применяются при следующем запуске. "
+            "БД — можно менять сразу, без перезапуска.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#dcdcaa; padding:4px; "
+                           "background:#2d2d30; border-radius:3px;")
+        dir_l.addWidget(hint)
+        self.dir_table = QTableWidget()
+        self.dir_table.setColumnCount(4)
+        self.dir_table.setHorizontalHeaderLabels(
+            ["Назначение", "Путь", "Существует?", "Действия"])
+        hh = self.dir_table.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(1, QHeaderView.Stretch)
+        hh.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        dir_l.addWidget(self.dir_table)
+        self._dir_defs = [
+            ("project_root",   "Проект (root)",
+             lambda: str(PROJECT_ROOT), True),
+            ("workspace",      "Рабочая папка",
+             lambda: str(WORKSPACE), True),
+            ("datasets_dir",   "Датасеты",
+             lambda: str(DATASETS_DIR), True),
+            ("training_output_dir", "Результаты обучения",
+             lambda: str(TRAINING_OUTPUT_DIR), True),
+            ("slices_dir",     "Срезы (HAG)",
+             lambda: str(SLICES_DIR), True),
+            ("projects_dir",   "AI-проекты",
+             lambda: str(PROJECTS_DIR), True),
+            ("reference_db",   "SQLite-эталоны",
+             lambda: str(REFERENCE_DB_PATH), False),
+            ("epsg_catalog",   "Справочник EPSG",
+             lambda: str(EPSG_CATALOG_PATH), False),
+            ("settings_dir",   "Настройки (app)",
+             lambda: str(Path.home() / ".config" / "city3d"), True),
+            ("settings_file",  "settings.json",
+             lambda: str(self.SETTINGS_FILE), False),
+            ("hf_cache",       "HuggingFace кэш",
+             lambda: str(_RESOLVED_PATHS["hf_cache"]), True),
+        ]
+        self._render_dir_table()
+        dir_btns = QHBoxLayout()
+        b_save = QPushButton("💾 Сохранить пути (перезапуск)")
+        b_save.setStyleSheet(
+            "background:#0e639c; color:white; font-weight:bold;")
+        b_save.clicked.connect(self._save_paths)
+        dir_btns.addWidget(b_save)
+        b_reset = QPushButton("↺ Сбросить к дефолтам")
+        b_reset.clicked.connect(self._reset_paths)
+        dir_btns.addWidget(b_reset)
+        b_open_cfg = QPushButton("📂 Папка настроек")
+        b_open_cfg.clicked.connect(self._open_cfg_dir)
+        dir_btns.addWidget(b_open_cfg)
+        dir_btns.addStretch()
+        dir_l.addLayout(dir_btns)
+        layout.addWidget(dir_gb)
+
+        # ═════ БЛОК 2: БД ═════
+        db_gb = QGroupBox("🗄 База данных PostgreSQL")
+        db_l = QFormLayout(db_gb)
+        self.db_status = QLabel("—")
+        self.db_status.setStyleSheet(
+            "padding:6px; font-weight:bold; border-radius:3px; "
+            "background:#252526;")
+        db_l.addRow("Статус:", self.db_status)
+        self.db_name = QLineEdit()
+        self.db_host = QLineEdit()
+        self.db_port = QLineEdit()
+        self.db_user = QLineEdit()
+        self.db_pass = QLineEdit()
+        self.db_pass.setEchoMode(QLineEdit.Password)
+        self.db_schema_refs = QLineEdit()
+        self.db_schema_hist = QLineEdit()
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("БД:"))
+        row1.addWidget(self.db_name, 1)
+        row1.addWidget(QLabel("Хост:"))
+        row1.addWidget(self.db_host, 1)
+        row1.addWidget(QLabel("Порт:"))
+        self.db_port.setMaximumWidth(80)
+        row1.addWidget(self.db_port)
+        db_l.addRow("Подключение:", row1)
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Польз.:"))
+        row2.addWidget(self.db_user, 1)
+        row2.addWidget(QLabel("Пароль:"))
+        row2.addWidget(self.db_pass, 1)
+        db_l.addRow("", row2)
+        row3 = QHBoxLayout()
+        row3.addWidget(QLabel("Schema refs:"))
+        row3.addWidget(self.db_schema_refs, 1)
+        row3.addWidget(QLabel("Schema history:"))
+        row3.addWidget(self.db_schema_hist, 1)
+        db_l.addRow("", row3)
+        db_btns = QHBoxLayout()
+        b_test = QPushButton("🧪 Тест подключения")
+        b_test.clicked.connect(self._test_db)
+        db_btns.addWidget(b_test)
+        b_apply = QPushButton("↻ Применить сейчас")
+        b_apply.setStyleSheet(
+            "background:#0e639c; color:white; font-weight:bold;")
+        b_apply.clicked.connect(self._apply_db_now)
+        db_btns.addWidget(b_apply)
+        b_save_db = QPushButton("💾 Сохранить")
+        b_save_db.clicked.connect(self._save_db)
+        db_btns.addWidget(b_save_db)
+        db_btns.addStretch()
+        db_l.addRow("", db_btns)
+        self.db_log = LogWidget()
+        self.db_log.setMaximumHeight(100)
+        db_l.addRow(self.db_log)
+        layout.addWidget(db_gb)
+
+        # ═════ БЛОК 3: Git ═════
+        git_gb = QGroupBox("📦 Git репозиторий")
+        git_l = QFormLayout(git_gb)
+        self.git_dir = QLineEdit()
+        self.git_dir.setText(str(Path(__file__).parent.resolve()))
+        git_l.addRow("Папка репо:", self.git_dir)
+        self.git_info = QTextEdit()
+        self.git_info.setReadOnly(True)
+        self.git_info.setFont(QFont("Monospace", 9))
+        self.git_info.setMaximumHeight(200)
+        self.git_info.setStyleSheet(
+            "background:#1e1e1e; color:#d4d4d4; border:1px solid #3c3c3c;")
+        git_l.addRow(self.git_info)
+        git_btns = QHBoxLayout()
+        b_rf = QPushButton("🔄 Обновить")
+        b_rf.clicked.connect(self._refresh_git)
+        git_btns.addWidget(b_rf)
+        b_log = QPushButton("📜 git log (30)")
+        b_log.clicked.connect(self._show_git_log)
+        git_btns.addWidget(b_log)
+        b_status = QPushButton("📊 git status")
+        b_status.clicked.connect(self._show_git_status)
+        git_btns.addWidget(b_status)
+        git_btns.addStretch()
+        git_l.addRow("", git_btns)
+        layout.addWidget(git_gb)
+
+        # ═════ БЛОК 4: Объём ═════
+        vol_gb = QGroupBox("💾 Объём ресурсов")
+        vol_l = QVBoxLayout(vol_gb)
+        self.vol_table = QTableWidget()
+        self.vol_table.setColumnCount(3)
+        self.vol_table.setHorizontalHeaderLabels(
+            ["Ресурс", "Размер", "Свободно на диске"])
+        self.vol_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch)
+        vol_l.addWidget(self.vol_table)
+        vol_btns = QHBoxLayout()
+        b_rec = QPushButton("🔄 Пересчитать")
+        b_rec.clicked.connect(self._refresh_volumes)
+        vol_btns.addWidget(b_rec)
+        b_disk = QPushButton("📊 По дискам")
+        b_disk.clicked.connect(self._show_disks)
+        vol_btns.addWidget(b_disk)
+        vol_btns.addStretch()
+        vol_l.addLayout(vol_btns)
+        layout.addWidget(vol_gb)
+
+        scroll.setWidget(inner)
+        outer.addWidget(scroll)
+
+    # ── Директории ────────────────────────────────────────────
+    def _render_dir_table(self):
+        rows = self._dir_defs
+        self.dir_table.setRowCount(len(rows))
+        self._dir_rows = {}
+        for i, (key, label, path_fn, is_dir) in enumerate(rows):
+            path_str = path_fn()
+            p = Path(path_str)
+            exists = p.exists()
+            it_label = QTableWidgetItem(label)
+            it_path = QTableWidgetItem(path_str)
+            it_exists = QTableWidgetItem("✅ да" if exists else "❌ нет")
+            if not exists:
+                it_exists.setForeground(Qt.yellow)
+            self.dir_table.setItem(i, 0, it_label)
+            self.dir_table.setItem(i, 1, it_path)
+            self.dir_table.setItem(i, 2, it_exists)
+            cell = QWidget()
+            cl = QHBoxLayout(cell)
+            cl.setContentsMargins(0, 0, 0, 0)
+            cl.setSpacing(2)
+            if exists:
+                b_open = QPushButton("📂")
+                b_open.setFixedWidth(30)
+                b_open.clicked.connect(
+                    lambda _, pp=path_str: self._open_path(pp))
+                cl.addWidget(b_open)
+            if key in ("project_root", "workspace", "datasets_dir",
+                       "training_output_dir", "projects_dir",
+                       "reference_db", "epsg_catalog"):
+                b_edit = QPushButton("✎")
+                b_edit.setFixedWidth(30)
+                b_edit.clicked.connect(
+                    lambda _, k=key, d=is_dir: self._edit_path(k, d))
+                cl.addWidget(b_edit)
+            cl.addStretch()
+            self.dir_table.setCellWidget(i, 3, cell)
+            self._dir_rows[key] = (i, path_fn)
+
+    def _open_path(self, path_str):
+        p = Path(path_str)
+        if p.is_file():
+            p = p.parent
+        if not p.exists():
+            QMessageBox.warning(self, "Ошибка", "Не найдено: " + str(p))
+            return
+        try:
+            subprocess.Popen(["xdg-open", str(p)])
+        except Exception as e:
+            QMessageBox.information(
+                self, "Путь", str(p) + _NL + _NL + str(e))
+
+    def _edit_path(self, key, is_dir):
+        if key in ("settings_dir", "settings_file"):
+            QMessageBox.information(self, "Настройки", "Расположение настроек фиксировано: ~/.config/city3d/settings.json")
+            return
+        i, path_fn = self._dir_rows[key]
+        cur = path_fn()
+        if is_dir:
+            new = QFileDialog.getExistingDirectory(
+                self, "Папка для " + key,
+                str(Path(cur).parent if Path(cur).exists()
+                    else Path.home()))
+        else:
+            new, _ = QFileDialog.getSaveFileName(
+                self, "Файл для " + key, cur, "All Files (*)")
+        if not new:
+            return
+        self.dir_table.setItem(i, 1, QTableWidgetItem(new))
+        self._save_path_to_file(key, new)
+        self.dir_table.item(i, 2).setText(
+            "✅ да" if Path(new).exists() else "⚠ нет")
+
+    def _save_path_to_file(self, key, value):
+        try:
+            self.SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            data = {}
+            if self.SETTINGS_FILE.exists():
+                try:
+                    data = _json_top.loads(
+                        self.SETTINGS_FILE.read_text(encoding="utf-8"))
+                except Exception:
+                    data = {}
+            data.setdefault("paths", {})[key] = value
+            data.setdefault("version", "v2")
+            save_settings(data, self.SETTINGS_FILE)
+            print("[SETTINGS] " + key + " = " + value)
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка записи", str(e))
+
+    def _save_paths(self):
+        QMessageBox.information(
+            self, "Готово",
+            "Пути сохранены: " + _NL + str(self.SETTINGS_FILE) + _NL
+            + "Изменения применятся при следующем запуске.")
+        self.refresh_all()
+
+    def _reset_paths(self):
+        ans = QMessageBox.question(
+            self, "Сбросить?",
+            "Удалить сохранённые пути?",
+            QMessageBox.Yes | QMessageBox.No)
+        if ans != QMessageBox.Yes:
+            return
+        try:
+            if self.SETTINGS_FILE.exists():
+                data = _json_top.loads(
+                    self.SETTINGS_FILE.read_text(encoding="utf-8"))
+                data.pop("paths", None)
+                save_settings(data, self.SETTINGS_FILE)
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка", str(e))
+        self._render_dir_table()
+
+    def _open_cfg_dir(self):
+        d = Path.home() / ".config" / "city3d"
+        d.mkdir(parents=True, exist_ok=True)
+        try:
+            subprocess.Popen(["xdg-open", str(d)])
+        except Exception as e:
+            QMessageBox.information(
+                self, "Путь", str(d) + _NL + _NL + str(e))
+
+    # ── БД ────────────────────────────────────────────────────
+    def _load_db_to_form(self):
+        p = DB_PARAMS
+        self.db_name.setText(p.get("dbname", "city3d"))
+        self.db_host.setText(p.get("host", "localhost"))
+        self.db_port.setText(str(p.get("port", "5432")))
+        self.db_user.setText(p.get("user", "postgres"))
+        self.db_pass.setText(p.get("password", ""))
+        self.db_schema_refs.setText(p.get("schema_refs", "refs"))
+        self.db_schema_hist.setText(p.get("schema_history", "history"))
+
+    def _form_to_db(self):
+        return {
+            "dbname": self.db_name.text().strip(),
+            "host": self.db_host.text().strip(),
+            "port": self.db_port.text().strip() or "5432",
+            "user": self.db_user.text().strip(),
+            "password": self.db_pass.text(),
+            "schema_refs": self.db_schema_refs.text().strip() or "refs",
+            "schema_history": self.db_schema_hist.text().strip()
+                              or "history",
+        }
+
+    def _test_db(self):
+        params = self._form_to_db()
+        try:
+            import psycopg
+        except ImportError:
+            self.db_status.setText("❌ psycopg не установлен")
+            self.db_status.setStyleSheet(
+                "padding:6px; font-weight:bold; border-radius:3px; "
+                "background:#a03030; color:white;")
+            return
+        dsn = ("dbname=" + params["dbname"] + " host=" + params["host"]
+               + " port=" + params["port"] + " user=" + params["user"]
+               + " password=" + params.get("password", ""))
+        try:
+            conn = psycopg.connect(dsn, connect_timeout=5)
+            with conn.cursor() as cur:
+                cur.execute("SELECT version()")
+                ver = cur.fetchone()[0]
+                cur.execute(
+                    "SELECT COUNT(*) FROM information_schema.tables "
+                    "WHERE table_schema IN (%s, %s)",
+                    (params["schema_refs"], params["schema_history"]))
+                n_tab = cur.fetchone()[0]
+            conn.close()
+            self.db_status.setText(
+                "✅ " + params["dbname"] + " @ "
+                + params["host"] + ":" + params["port"]
+                + " (" + str(n_tab) + " таблиц)")
+            self.db_status.setStyleSheet(
+                "padding:6px; font-weight:bold; border-radius:3px; "
+                "background:#2d5c2d; color:white;")
+            self.db_log.log("Тест: OK", "SUCCESS")
+        except Exception as e:
+            self.db_status.setText("❌ " + str(e))
+            self.db_status.setStyleSheet(
+                "padding:6px; font-weight:bold; border-radius:3px; "
+                "background:#a03030; color:white;")
+            self.db_log.log("Тест: " + str(e), "ERROR")
+
+    def _save_db(self):
+        params = self._form_to_db()
+        try:
+            self.SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            data = {}
+            if self.SETTINGS_FILE.exists():
+                try:
+                    data = _json_top.loads(
+                        self.SETTINGS_FILE.read_text(encoding="utf-8"))
+                except Exception:
+                    data = {}
+            data["database"] = params
+            data.setdefault("version", "v2")
+            save_settings(data, self.SETTINGS_FILE)
+            self.db_log.log(
+                "Сохранено: " + str(self.SETTINGS_FILE), "SUCCESS")
+        except Exception as e:
+            self.db_log.log("Ошибка: " + str(e), "ERROR")
+
+    def _apply_db_now(self):
+        params = self._form_to_db()
+        try:
+            DB_PARAMS.update(params)
+        except Exception:
+            pass
+        try:
+            hdb = getattr(self.main_window, "history_db", None)
+            if hdb and hdb.conn:
+                try:
+                    hdb.conn.close()
+                except Exception:
+                    pass
+            new_hdb = TrainingHistoryDB(
+                params, log_widget=self.main_window.log_widget)
+            self.main_window.history_db = new_hdb
+            if new_hdb.is_available:
+                new_hdb.load_epsg_catalog()
+                self.db_log.log("Переподключено", "SUCCESS")
+            else:
+                self.db_log.log("Не удалось", "WARNING")
+        except Exception as e:
+            self.db_log.log("Ошибка: " + str(e), "ERROR")
+        self._test_db()
+
+    # ── Git ───────────────────────────────────────────────────
+    def _refresh_git(self):
+        repo = self.git_dir.text().strip()
+        if not repo or not Path(repo).exists():
+            self.git_info.setPlainText("❌ Папка не найдена")
+            return
+        lines = ["Папка: " + repo]
+        def _run_git(*args):
+            try:
+                r = subprocess.run(
+                    ["git", "-C", repo, *args],
+                    capture_output=True, text=True, timeout=10)
+                return (r.stdout.strip() if r.returncode == 0
+                        else "[err] " + r.stderr.strip())
+            except FileNotFoundError:
+                return "[err] git не найден"
+            except Exception as e:
+                return "[err] " + str(e)
+        is_repo = _run_git("rev-parse", "--is-inside-work-tree")
+        if "true" not in is_repo:
+            self.git_info.setPlainText(
+                "❌ Не Git-репозиторий: " + repo)
+            return
+        branch = _run_git("rev-parse", "--abbrev-ref", "HEAD")
+        head_sha = _run_git("rev-parse", "--short", "HEAD")
+        head_msg = _run_git("log", "-1", "--pretty=%s")
+        head_when = _run_git("log", "-1", "--pretty=%ar")
+        head_author = _run_git("log", "-1", "--pretty=%an")
+        n_commits = _run_git("rev-list", "--count", "HEAD")
+        n_mod = _run_git("status", "--porcelain", "--untracked-files=no")
+        n_mod_cnt = len([l for l in n_mod.split(_NL) if l.strip()])
+        n_unt = _run_git("status", "--porcelain", "--untracked-files=all")
+        n_unt_cnt = len(
+            [l for l in n_unt.split(_NL) if l.startswith("??")])
+        remote = _run_git("remote", "-v")
+        remotes_lines = []
+        for ln in remote.split(_NL):
+            if ln.strip():
+                remotes_lines.append("  " + ln.strip())
+        lines += [
+            "Ветка:         " + branch,
+            "HEAD:          " + head_sha,
+            "Последний:     " + head_msg + " (" + head_when + ")",
+            "Автор:         " + head_author,
+            "Всего коммитов: " + n_commits,
+            "Изменено:      " + str(n_mod_cnt),
+            "Untracked:     " + str(n_unt_cnt),
+            "",
+            "Remotes:",
+        ] + (remotes_lines or ["  (нет)"])
+        self.git_info.setPlainText(_NL.join(lines))
+
+    def _show_git_log(self):
+        repo = self.git_dir.text().strip()
+        try:
+            r = subprocess.run(
+                ["git", "-C", repo, "log", "-30",
+                 "--pretty=%h %ad %an : %s", "--date=short"],
+                capture_output=True, text=True, timeout=10)
+            txt = r.stdout if r.returncode == 0 else r.stderr
+        except Exception as e:
+            txt = str(e)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("git log -30")
+        dlg.resize(900, 600)
+        v = QVBoxLayout(dlg)
+        view = QTextEdit()
+        view.setReadOnly(True)
+        view.setFont(QFont("Monospace", 9))
+        view.setPlainText(txt)
+        v.addWidget(view)
+        dlg.exec_()
+
+    def _show_git_status(self):
+        repo = self.git_dir.text().strip()
+        try:
+            r = subprocess.run(
+                ["git", "-C", repo, "status"],
+                capture_output=True, text=True, timeout=10)
+            txt = r.stdout if r.returncode == 0 else r.stderr
+        except Exception as e:
+            txt = str(e)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("git status")
+        dlg.resize(900, 600)
+        v = QVBoxLayout(dlg)
+        view = QTextEdit()
+        view.setReadOnly(True)
+        view.setFont(QFont("Monospace", 9))
+        view.setPlainText(txt)
+        v.addWidget(view)
+        dlg.exec_()
+
+    # ── Объём ─────────────────────────────────────────────────
+    @staticmethod
+    def _human_size(nbytes):
+        for unit in ("Б", "КБ", "МБ", "ГБ", "ТБ"):
+            if nbytes < 1024:
+                return str(round(nbytes, 1)) + " " + unit
+            nbytes /= 1024
+        return str(round(nbytes, 1)) + " ПБ"
+
+    @staticmethod
+    def _dir_size_du(path):
+        try:
+            r = subprocess.run(
+                ["du", "-sb", str(path)],
+                capture_output=True, text=True, timeout=60)
+            if r.returncode == 0:
+                return int(r.stdout.split()[0])
+        except Exception:
+            pass
+        total = 0
+        try:
+            for f in Path(path).rglob("*"):
+                if f.is_file():
+                    try:
+                        total += f.stat().st_size
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return total
+
+    def _refresh_volumes(self):
+        items = [
+            ("Проект (root)", PROJECT_ROOT),
+            ("Workspace", WORKSPACE),
+            ("  training_output", TRAINING_OUTPUT_DIR),
+            ("  datasets", DATASETS_DIR),
+            ("  slices", SLICES_DIR),
+            ("AI-проекты", PROJECTS_DIR),
+            ("~/.config/city3d", Path.home() / ".config" / "city3d"),
+            ("HF кэш", Path.home() / ".cache" / "huggingface"),
+        ]
+        self.vol_table.setRowCount(len(items))
+        for i, (label, path) in enumerate(items):
+            p = Path(path)
+            if p.exists():
+                sz = self._dir_size_du(p)
+                sz_txt = self._human_size(sz)
+            else:
+                sz_txt = "— (нет)"
+            free_txt = "—"
+            try:
+                target = p if p.exists() else p.parent
+                if target.exists():
+                    du = shutil.disk_usage(str(target))
+                    free_txt = (self._human_size(du.free) + " из "
+                                + self._human_size(du.total))
+            except Exception:
+                pass
+            self.vol_table.setItem(i, 0, QTableWidgetItem(label))
+            self.vol_table.setItem(i, 1, QTableWidgetItem(sz_txt))
+            self.vol_table.setItem(i, 2, QTableWidgetItem(free_txt))
+
+    def _show_disks(self):
+        try:
+            r = subprocess.run(["df", "-h"], capture_output=True,
+                               text=True, timeout=10)
+            txt = r.stdout
+        except Exception as e:
+            txt = str(e)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("df -h")
+        dlg.resize(900, 400)
+        v = QVBoxLayout(dlg)
+        view = QTextEdit()
+        view.setReadOnly(True)
+        view.setFont(QFont("Monospace", 9))
+        view.setPlainText(txt)
+        v.addWidget(view)
+        dlg.exec_()
+
+    def refresh_all(self):
+        for fn in (self._load_db_to_form, self._test_db,
+                   self._refresh_git, self._refresh_volumes):
+            try:
+                fn()
+            except Exception:
+                pass
+
+
+
+# CITY3D_TAB1_PATCH_1_0_0
+from city3d_tab1.gui import upgrade_load_tab as _upgrade_city3d_tab1
+LoadDataTab = _upgrade_city3d_tab1(LoadDataTab, globals())
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -5909,7 +7988,7 @@ class MainWindow(QMainWindow):
             self.history_db.load_epsg_catalog()
 
         self.setWindowTitle(
-            "City3D PointCloud Pipeline v7.3.1 — структура v4 + M1-M6 + PG")
+            "City3D PointCloud Pipeline v7.5.0 — CPU M1 + M2-M6 + PG")
         self.setMinimumSize(1700, 1000)
         self.init_ui()
 
@@ -5967,7 +8046,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
         title = QLabel(
-            "City3D PointCloud Pipeline v7.3.1 — структура v4 + M1-M6 + PG")
+            "City3D PointCloud Pipeline v7.5.0 — CPU M1 + M2-M6 + PG")
         title.setStyleSheet(
             "font-size: 16px; font-weight: bold; color: #4ec9b0; "
             "padding: 10px;")
@@ -5984,6 +8063,11 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(ExportTab(self), "6. Экспорт")
         self.tabs.addTab(ReferenceDBTab(self), "7. База эталонов")
         self.tabs.addTab(HistoryTab(self), "8. История обучений")
+        # PATCHED_SETTINGS_TAB_V2
+        self.tabs.addTab(SettingsTab(self), "9. Настройки")
+        from city3d_backend.gui_layers import LayerTab
+        self.layer_tab=LayerTab(self)
+        self.tabs.addTab(self.layer_tab,"10. Карта и слои")
         main_splitter.addWidget(self.tabs)
 
         right = QWidget()
@@ -5999,11 +8083,32 @@ class MainWindow(QMainWindow):
         main_splitter.setSizes([1300, 400])
         layout.addWidget(main_splitter)
         self.statusBar().showMessage(f"Рабочая директория: {WORKSPACE}")
+        from PyQt5.QtWidgets import QDockWidget, QShortcut
+        from PyQt5.QtGui import QKeySequence
+        self.help_registry=json.loads((Path(__file__).parent/"resources/help_ru.json").read_text())
+        self.help_panel=QTextEdit();self.help_panel.setReadOnly(True)
+        dock=QDockWidget("Справка оператора — F1",self);dock.setWidget(self.help_panel)
+        self.addDockWidget(Qt.BottomDockWidgetArea,dock)
+        self.help_shortcut=QShortcut(QKeySequence("F1"),self)
+        self.help_shortcut.activated.connect(self._show_context_help)
+        self.tabs.currentChanged.connect(self._show_context_help)
+        for index in range(self.tabs.count()):
+            help_entry=self.help_registry.get(str(index),{})
+            self.tabs.widget(index).setToolTip(help_entry.get("need",""))
+        self._show_context_help()
 
     def closeEvent(self, event):
-        for w in list(_ACTIVE_WORKERS):
+        layer_worker=getattr(getattr(self,"layer_tab",None),"worker",None)
+        if hasattr(self,"layer_tab"):self.layer_tab.pending.clear()
+        workers=list(_ACTIVE_WORKERS)
+        if layer_worker is not None and layer_worker.isRunning():workers.append(layer_worker)
+        for worker in workers:worker.requestInterruption()
+        for w in workers:
             try:
-                w.wait(3000)
+                if not w.wait(3000):
+                    self.statusBar().showMessage("Отмена: ожидание завершения текущей операции")
+                    event.ignore()
+                    return
             except Exception:
                 pass
         try:
@@ -6013,10 +8118,26 @@ class MainWindow(QMainWindow):
             pass
         event.accept()
 
+    def _show_context_help(self, *args):
+        entry=self.help_registry.get(str(self.tabs.currentIndex()),{})
+        text=[entry.get("title","")]
+        for key,title in (("need","Что нужно"),("action","Что произойдёт"),("result","Что получится"),("limits","Ограничения"),("next","Следующий шаг")):
+            text.append(title+": "+entry.get(key,""))
+        self.help_panel.setPlainText("\n\n".join(text))
+
 
 # ============================================================================
 # Точка входа
 # ============================================================================
+
+
+
+
+
+# BEGIN CITY3D_FIXSET_20261016
+from city3d_fixes.integration import install as _install_city3d_fixes
+_install_city3d_fixes(globals(), level=3)
+# END CITY3D_FIXSET_20261016
 
 def main():
     # 1) Отключаем шум KDE/KF5/Wayland и GPU у Chromium

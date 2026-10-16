@@ -1,0 +1,8 @@
+{
+ "version":1,
+ "spatial":{"vertical_crs":"operator must confirm","height_offset":0},
+ "tasks":[
+  {"id":"classify","executor":"m1.cpu","mode":"infer","inputs":{"asset":"/absolute/path/input.las"},"params":{"config":{"units":"metres","ground_backend":"smrf"}}},
+  {"id":"export","executor":"export.las","mode":"export","dependencies":["classify"],"inputs":{"asset":{"task":"classify","output":"classified"}}}
+ ]
+}
