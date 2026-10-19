@@ -11,6 +11,16 @@ from uuid import uuid4,uuid5,NAMESPACE_URL
 from .settings import read_settings,atomic_json
 from .core import sha256
 
+
+# CITY3D_SQLITE_CLOSE_FIX_20261019
+class _City3DClosingSQLite(sqlite3.Connection):
+    def __exit__(self, *exc):
+        try:
+            return super().__exit__(*exc)
+        finally:
+            self.close()
+
+
 STATUSES=('planned','ready','running','success','failed','cancelled','skipped','blocked','partial')
 
 def identifier(name):
@@ -70,7 +80,7 @@ def backup(directory,settings=None):
     return output
 
 def sqlite_backup(source,target):
-    with sqlite3.connect('file:'+str(Path(source).resolve())+'?mode=ro',uri=True) as src,sqlite3.connect(target) as dst:
+    with sqlite3.connect('file:'+str(Path(source).resolve())+'?mode=ro',uri=True,factory=_City3DClosingSQLite) as src,sqlite3.connect(target,factory=_City3DClosingSQLite) as dst:
         src.backup(dst)
 
 def migrate(settings=None,backup_manifest=None):
@@ -171,14 +181,14 @@ class Repository:
 class LocalJournal:
     def __init__(self,path):
         self.path=Path(path);self.path.parent.mkdir(parents=True,exist_ok=True)
-        with sqlite3.connect(self.path) as conn:
+        with sqlite3.connect(self.path,factory=_City3DClosingSQLite) as conn:
             conn.execute('CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY, topic TEXT NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL DEFAULT "pending",error TEXT)')
     def enqueue(self,uid,topic,payload):
-        with sqlite3.connect(self.path) as conn:
+        with sqlite3.connect(self.path,factory=_City3DClosingSQLite) as conn:
             conn.execute('INSERT INTO outbox(id,topic,payload) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,status="pending"',(uid,topic,json.dumps(payload,ensure_ascii=False)))
     def sync(self,repository):
         successes=0
-        with sqlite3.connect(self.path) as conn:
+        with sqlite3.connect(self.path,factory=_City3DClosingSQLite) as conn:
             for uid,topic,payload in conn.execute('SELECT id,topic,payload FROM outbox WHERE status="pending"').fetchall():
                 try:
                     if topic!='run':raise ValueError('Unsupported journal topic')
@@ -218,7 +228,7 @@ def reconcile_sqlite_references(sqlite_path,repository):
     from pyproj import Transformer
     from shapely.geometry import box
     report=[]
-    with sqlite3.connect('file:'+str(Path(sqlite_path).resolve())+'?mode=ro',uri=True) as legacy:
+    with sqlite3.connect('file:'+str(Path(sqlite_path).resolve())+'?mode=ro',uri=True,factory=_City3DClosingSQLite) as legacy:
         rows=legacy.execute('SELECT id,name,path FROM references_clouds').fetchall()
     for legacy_id,name,location in rows:
         path=Path(location)

@@ -13,6 +13,16 @@ from pyproj import CRS
 from pyproj.database import query_crs_info
 from pyproj.transformer import TransformerGroup
 
+
+# CITY3D_SQLITE_CLOSE_FIX_20261019
+class _City3DClosingSQLite(sqlite3.Connection):
+    def __exit__(self, *exc):
+        try:
+            return super().__exit__(*exc)
+        finally:
+            self.close()
+
+
 EXTENSIONS = {'.las', '.laz', '.ply', '.pcd', '.xyz', '.e57', '.bin', '.txt'}
 
 
@@ -193,7 +203,7 @@ class Journal:
             db.execute('CREATE TABLE IF NOT EXISTS inspections (id TEXT PRIMARY KEY, record TEXT NOT NULL)')
 
     def connect(self):
-        return sqlite3.connect(self.path, timeout=30)
+        return sqlite3.connect(self.path, timeout=30, factory=_City3DClosingSQLite)
 
     def save(self, record):
         payload = json.dumps(record, ensure_ascii=False)

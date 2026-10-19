@@ -1,0 +1,110 @@
+{
+  "status": "installed",
+  "time": "2026-10-19T09:57:10.921550+00:00",
+  "python": "3.14.4 (main, Aug 20 2026, 10:41:58) [GCC 15.2.0]",
+  "target": "/mnt/data_sda1/PR_3D_SPB/city3d-pipeline/city3d_pipeline_v5.py",
+  "tests": {
+    "fd": {
+      "returncode": 0,
+      "stdout": "{\"status\": \"passed\", \"soft_fd_limit\": 96, \"gc_disabled\": true, \"descriptors\": {\"start\": 5, \"after_sqlite\": 5, \"before_server\": 5, \"after_1200_http_requests\": 6, \"after_shutdown\": 5}, \"server\": {\"active_requests\": 1, \"peak_requests\": 12, \"max_requests\": 12, \"rejected_requests\": 8, \"request_errors\": 0, \"last_error\": null, \"open_fds\": 6, \"soft_limit\": 96, \"hard_limit\": 524288}, \"checks\": [\"600_MBtiles_reads_and_cache_misses\", \"600_LAS_inventory_save_read_cycles\", \"600_outbox_enqueues_and_sync\", \"connection_closed_even_when_reference_is_held\", \"transactions_commit_and_rollback_preserved\", \"HTTPError_response_streams_closed\", \"1200_HTTP_requests_no_fd_growth\", \"240_concurrent_tile_requests\", \"slow_clients_bounded_to_12_workers\", \"static_page_scene_and_health_available_after_load\", \"path_traversal_blocked\", \"idempotent_shutdown_releases_listener\"]}\n",
+      "stderr": "",
+      "result": {
+        "status": "passed",
+        "soft_fd_limit": 96,
+        "gc_disabled": true,
+        "descriptors": {
+          "start": 5,
+          "after_sqlite": 5,
+          "before_server": 5,
+          "after_1200_http_requests": 6,
+          "after_shutdown": 5
+        },
+        "server": {
+          "active_requests": 1,
+          "peak_requests": 12,
+          "max_requests": 12,
+          "rejected_requests": 8,
+          "request_errors": 0,
+          "last_error": null,
+          "open_fds": 6,
+          "soft_limit": 96,
+          "hard_limit": 524288
+        },
+        "checks": [
+          "600_MBtiles_reads_and_cache_misses",
+          "600_LAS_inventory_save_read_cycles",
+          "600_outbox_enqueues_and_sync",
+          "connection_closed_even_when_reference_is_held",
+          "transactions_commit_and_rollback_preserved",
+          "HTTPError_response_streams_closed",
+          "1200_HTTP_requests_no_fd_growth",
+          "240_concurrent_tile_requests",
+          "slow_clients_bounded_to_12_workers",
+          "static_page_scene_and_health_available_after_load",
+          "path_traversal_blocked",
+          "idempotent_shutdown_releases_listener"
+        ]
+      }
+    },
+    "coverage": {
+      "returncode": 0,
+      "stdout": "{\"status\": \"passed\", \"old_sample_scan_rows\": 32, \"new_sample_scan_rows\": 256, \"total_scan_rows\": 256, \"mmap_fds_before\": 6, \"mmap_fds_after\": 6, \"coverage_points\": 516, \"coverage_components\": 2, \"holes_preserved\": true, \"checks\": [\"stratified_LAS_preview_covers_all_scan_rows\", \"80_mmap_previews_close_file_handles\", \"all_points_occupied_cell_coverage\", \"hole_and_disconnected_island_preserved\", \"gap_not_filled_by_BBOX_or_convex_hull\", \"coverage_cache_reused\", \"cell_limit_explicit_not_silent\", \"OSM_SQLite_tile_persisted_and_read_without_network\", \"other_service_tile_persisted_per_provider\", \"cache_status_counts_real_tiles\"]}\n",
+      "stderr": "",
+      "result": {
+        "status": "passed",
+        "old_sample_scan_rows": 32,
+        "new_sample_scan_rows": 256,
+        "total_scan_rows": 256,
+        "mmap_fds_before": 6,
+        "mmap_fds_after": 6,
+        "coverage_points": 516,
+        "coverage_components": 2,
+        "holes_preserved": true,
+        "checks": [
+          "stratified_LAS_preview_covers_all_scan_rows",
+          "80_mmap_previews_close_file_handles",
+          "all_points_occupied_cell_coverage",
+          "hole_and_disconnected_island_preserved",
+          "gap_not_filled_by_BBOX_or_convex_hull",
+          "coverage_cache_reused",
+          "cell_limit_explicit_not_silent",
+          "OSM_SQLite_tile_persisted_and_read_without_network",
+          "other_service_tile_persisted_per_provider",
+          "cache_status_counts_real_tiles"
+        ]
+      }
+    },
+    "gui": {
+      "returncode": 0,
+      "stdout": "{\"status\": \"passed\", \"checks\": [\"real_LAS_index_in_QThread\", \"auto_check_and_preview\", \"two_LAS_preview\", \"real_build_revision_10_points\", \"full_loader_and_activation_without_OpenGL\", \"classes_preserved\", \"remove_invalidates_active_state\", \"source_files_preserved\", \"removal_persists_on_restart\", \"explicit_readd\", \"mixed_UTM_zones_align\", \"missing_CRS_does_not_block_other_files\", \"bounded_LAS_read_16000_of_100000\", \"worker_error_log\", \"compact_buttons\", \"MBTiles_TMS_rows\", \"offline_cache_miss_no_network\", \"WMS_1_3_axis_order\", \"service_registry\", \"all_points_coverage_in_actual_load_tab\"], \"limitations\": \"Qt offscreen; synthetic LAS; Open3D container and GL widget substituted; DB enrichment disabled. No real GPU/DB test.\"}\n",
+      "stderr": "",
+      "result": {
+        "status": "passed",
+        "checks": [
+          "real_LAS_index_in_QThread",
+          "auto_check_and_preview",
+          "two_LAS_preview",
+          "real_build_revision_10_points",
+          "full_loader_and_activation_without_OpenGL",
+          "classes_preserved",
+          "remove_invalidates_active_state",
+          "source_files_preserved",
+          "removal_persists_on_restart",
+          "explicit_readd",
+          "mixed_UTM_zones_align",
+          "missing_CRS_does_not_block_other_files",
+          "bounded_LAS_read_16000_of_100000",
+          "worker_error_log",
+          "compact_buttons",
+          "MBTiles_TMS_rows",
+          "offline_cache_miss_no_network",
+          "WMS_1_3_axis_order",
+          "service_registry",
+          "all_points_coverage_in_actual_load_tab"
+        ],
+        "limitations": "Qt offscreen; synthetic LAS; Open3D container and GL widget substituted; DB enrichment disabled. No real GPU/DB test."
+      }
+    }
+  },
+  "backup": "/mnt/data_sda1/city3d-backups/city3d_globe_stability_20261019T095719_119209Z"
+}

@@ -8139,6 +8139,14 @@ from city3d_fixes.integration import install as _install_city3d_fixes
 _install_city3d_fixes(globals(), level=3)
 # END CITY3D_FIXSET_20261016
 
+# CITY3D_LOAD_LAYOUT_REPAIR_20261016
+from city3d_load_layout_fix import install as _install_load_layout_fix
+_install_load_layout_fix(globals())
+
+# CITY3D_GLOBE_REPAIR_20261016
+from city3d_globe_fix import install as _install_globe_fix
+_install_globe_fix(globals())
+
 def main():
     # 1) Отключаем шум KDE/KF5/Wayland и GPU у Chromium
     os.environ.setdefault(

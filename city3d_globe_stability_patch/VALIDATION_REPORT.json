@@ -1,0 +1,149 @@
+{
+  "status": "passed",
+  "date_utc": "2026-10-19",
+  "artifact": "fix_city3d_globe_stability_20261019.py",
+  "sha256": "b3443c5bedc72822dd0712ca28515e2208ffdb088fb10ad845920b807bee7316",
+  "python": "3.12.14 (main, Aug 25 2026, 14:00:49) [Clang 22.1.3 ]",
+  "tests": {
+    "old_bug_reproduction": {
+      "start": 5,
+      "after_150_tile_reads": 306,
+      "after_150_journal_saves": 456,
+      "after_explicit_gc": 5,
+      "note": "GC disabled to expose delayed connection destruction. No network requests."
+    },
+    "installation_and_embedded_checks": {
+      "status": "passed",
+      "python": "3.12.14 (main, Aug 25 2026, 14:00:49) [Clang 22.1.3 ]",
+      "checks": [
+        "dry_run_does_not_change_program",
+        "embedded_FD_coverage_cache_GUI_tests_pass",
+        "backup_all_replaced_files",
+        "atomic_install_preserves_main_code",
+        "idempotent_reapply",
+        "refuse_unknown_modified_module",
+        "refuse_restore_over_later_user_edits",
+        "restore_original_files_and_remove_new_diagnostics"
+      ],
+      "embedded_test_results": {
+        "fd": {
+          "status": "passed",
+          "soft_fd_limit": 96,
+          "gc_disabled": true,
+          "descriptors": {
+            "start": 4,
+            "after_sqlite": 4,
+            "before_server": 4,
+            "after_1200_http_requests": 5,
+            "after_shutdown": 4
+          },
+          "server": {
+            "active_requests": 0,
+            "peak_requests": 12,
+            "max_requests": 12,
+            "rejected_requests": 8,
+            "request_errors": 0,
+            "last_error": null,
+            "open_fds": 5,
+            "soft_limit": 96,
+            "hard_limit": 16384
+          },
+          "checks": [
+            "600_MBtiles_reads_and_cache_misses",
+            "600_LAS_inventory_save_read_cycles",
+            "600_outbox_enqueues_and_sync",
+            "connection_closed_even_when_reference_is_held",
+            "transactions_commit_and_rollback_preserved",
+            "HTTPError_response_streams_closed",
+            "1200_HTTP_requests_no_fd_growth",
+            "240_concurrent_tile_requests",
+            "slow_clients_bounded_to_12_workers",
+            "static_page_scene_and_health_available_after_load",
+            "path_traversal_blocked",
+            "idempotent_shutdown_releases_listener"
+          ]
+        },
+        "coverage": {
+          "status": "passed",
+          "old_sample_scan_rows": 32,
+          "new_sample_scan_rows": 256,
+          "total_scan_rows": 256,
+          "mmap_fds_before": 5,
+          "mmap_fds_after": 5,
+          "coverage_points": 516,
+          "coverage_components": 2,
+          "holes_preserved": true,
+          "checks": [
+            "stratified_LAS_preview_covers_all_scan_rows",
+            "80_mmap_previews_close_file_handles",
+            "all_points_occupied_cell_coverage",
+            "hole_and_disconnected_island_preserved",
+            "gap_not_filled_by_BBOX_or_convex_hull",
+            "coverage_cache_reused",
+            "cell_limit_explicit_not_silent",
+            "OSM_SQLite_tile_persisted_and_read_without_network",
+            "other_service_tile_persisted_per_provider",
+            "cache_status_counts_real_tiles"
+          ]
+        },
+        "gui": {
+          "status": "passed",
+          "checks": [
+            "real_LAS_index_in_QThread",
+            "auto_check_and_preview",
+            "two_LAS_preview",
+            "real_build_revision_10_points",
+            "full_loader_and_activation_without_OpenGL",
+            "classes_preserved",
+            "remove_invalidates_active_state",
+            "source_files_preserved",
+            "removal_persists_on_restart",
+            "explicit_readd",
+            "mixed_UTM_zones_align",
+            "missing_CRS_does_not_block_other_files",
+            "bounded_LAS_read_16000_of_100000",
+            "worker_error_log",
+            "compact_buttons",
+            "MBTiles_TMS_rows",
+            "offline_cache_miss_no_network",
+            "WMS_1_3_axis_order",
+            "service_registry",
+            "all_points_coverage_in_actual_load_tab"
+          ],
+          "limitations": "Qt offscreen; synthetic LAS; Open3D container and GL widget substituted; DB enrichment disabled. No real GPU/DB test."
+        }
+      }
+    },
+    "browser": {
+      "status": "passed",
+      "browser": "Chromium 153 / SwiftShader",
+      "files": 2,
+      "polygons": 4,
+      "holes": [
+        0,
+        0,
+        1,
+        1
+      ],
+      "errors": [],
+      "external_requests": [],
+      "checks": [
+        "local_Cesium_and_Earth_texture_without_internet",
+        "two_LAS_files_with_multipart_coverage_and_holes",
+        "short_CRS_labels_with_tooltips",
+        "NASA_fallback_below_cache_overlay",
+        "persistent_cache_paths_and_counts_visible",
+        "coverage_visibility_switch",
+        "LAS_camera_navigation"
+      ]
+    }
+  },
+  "limitations": [
+    "Synthetic LAS fixtures; no access to user server or full 38M-point archive.",
+    "Qt offscreen; Open3D/GL viewer substituted in GUI tests.",
+    "Browser uses real Cesium with Chromium 153 and SwiftShader; no external network access.",
+    "Successful service responses mocked for cache persistence tests; live provider availability and credentials not validated.",
+    "PostgreSQL and AI model execution not exercised; coordinate transformation patch stays unapplied.",
+    "Installer reruns embedded FD, coverage/cache and GUI checks using the active Python environment."
+  ]
+}

@@ -1,0 +1,60 @@
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="referrer" content="strict-origin-when-cross-origin"><title>City3D — глобус LAS</title><link href="cesium/Widgets/widgets.css" rel="stylesheet"><script>window.CESIUM_BASE_URL='cesium/';</script><script src="cesium/Cesium.js"></script><style>html,body{margin:0;width:100%;height:100%;font:14px sans-serif;background:#17202a;color:#e8edf4}#globe{position:absolute;inset:0 0 0 300px}aside{position:absolute;width:276px;inset:0 auto 0 0;padding:12px;overflow:auto}button,select{padding:5px;margin:3px 0;background:#263d50;color:white;border:1px solid #62788c;border-radius:4px}button{cursor:pointer}select{width:100%;box-sizing:border-box}h2{font-size:19px}.file{border-top:1px solid #405060;padding:10px 0;overflow-wrap:anywhere}.muted{color:#acc0d1;font-size:12px}#error{color:#ffae9e;white-space:pre-wrap}.cesium-viewer-bottom{display:block!important}</style></head><body><aside><h2>City3D • глобус LAS</h2><select id="base"><option value="earth">NASA Blue Marble</option><option value="online">OSM: интернет + кэш</option><option value="cache">OSM: только кэш</option><option value="mbtiles">OSM: локальная MBTiles</option></select><button id="all">Все облака</button><p class="muted">Точки — пространственная выборка. Покрытие рассчитывается по всем точкам с выбранным шагом сетки. Разрывы и отверстия сохраняются на этом разрешении. Высоты не преобразуются.</p><p id="state">Подготовка…</p><div id="error"></div><div id="vendor-credit" class="muted"></div><div><label><input id="show-points" type="checkbox" checked>Точки</label> <label><input id="show-coverage" type="checkbox" checked>Покрытие</label> <label><input id="show-labels" type="checkbox" checked>Подписи</label></div><p id="cache-summary" class="muted"></p><details id="cache-details"><summary>Постоянный кэш подложек</summary><button id="cache-refresh">Обновить сведения</button><div id="cache-data" class="muted"></div></details><div id="files"></div><p class="muted">Спутниковая мозаика: NASA Earth Observatory. OSM: © OpenStreetMap contributors. Данные LAS обслуживаются локально. Интернет используется только для выбранных онлайн-подложек. Земля, LAS, кэш и MBTiles доступны локально. Пробелы локальной карты означают отсутствие тайлов в базе/кэше.</p></aside><div id="globe"></div><a id="brand" href="https://yandex.ru/maps/" target="_blank" rel="noopener" style="display:none;position:absolute;left:300px;top:0;z-index:5"><img src="yandex-logo.svg" alt="Яндекс" style="width:120px"></a><script>
+(async()=>{const state=document.getElementById('state'),err=document.getElementById('error'),list=document.getElementById('files');try{
+const C=Cesium;C.Ion.defaultAccessToken='';
+const viewer=new C.Viewer('globe',{baseLayer:false,baseLayerPicker:false,navigationInstructionsInitiallyVisible:false,terrainProvider:new C.EllipsoidTerrainProvider(),animation:false,timeline:false,geocoder:false,infoBox:false,selectionIndicator:false,skyBox:false,requestRenderMode:true,maximumRenderTimeChange:Infinity});
+window.city3dViewer=viewer;let refreshBusy=false,creditBusy=false,cacheBusy=false;async function localJson(path){const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),6000);try{const response=await fetch(path,{cache:"no-store",signal:controller.signal});if(!response.ok)throw new Error("HTTP "+response.status);return await response.json();}finally{clearTimeout(timer);}}let objects=[],allPositions=[],revision=-1,first=true,changing=0;
+async function base(){
+ const version=++changing,selection=document.getElementById('base'),value=selection.value;
+ document.getElementById('brand').style.display=value==='service:yandex:online'?'block':'none';
+ try{
+  const earth=await C.SingleTileImageryProvider.fromUrl('earth.png',{credit:new C.Credit('NASA Earth Observatory — Blue Marble',true)});
+  if(version!==changing)return;
+  viewer.imageryLayers.removeAll();viewer.imageryLayers.addImageryProvider(earth);
+  if(value!=='earth'){
+   const url=location.href+(value.startsWith('service:')?'services/'+value.split(':')[1]+'/'+value.split(':')[2]:'tiles/'+value)+'/{z}/{x}/{y}.png';
+   const provider=new C.UrlTemplateImageryProvider({url,maximumLevel:Number(selection.selectedOptions[0].dataset.maxzoom||19),credit:new C.Credit(selection.selectedOptions[0].dataset.credit||'© OpenStreetMap contributors',true)});
+   provider.errorEvent.addEventListener(()=>{err.textContent='Выбранная подложка недоступна. Локальная текстура Земли сохранена; проверьте подключение/ключ/кэш.';});
+   viewer.imageryLayers.addImageryProvider(provider);
+  }
+  err.textContent='';viewer.scene.requestRender();cacheInfo();
+ }catch(e){err.textContent='Подложка недоступна: '+e.message;}
+}
+document.getElementById('base').onchange=base;await base();
+try{const providers=await localJson('providers');for(const p of providers){for(const mode of (p.cache_allowed?['online','cache']:['online'])){const o=document.createElement('option');o.value='service:'+p.id+':'+mode;o.textContent=p.name+(mode==='cache'?' — только кэш':p.cache_allowed?' — интернет + кэш':' — интернет (без сохранения)');o.dataset.maxzoom=p.maxzoom;o.dataset.credit=p.attribution;document.getElementById('base').append(o);}}}catch(e){err.textContent='Реестр подложек недоступен; локальная Земля работает. '+e.message;}
+function footprintEntities(f,color){
+ const result=[];if(!f.footprint)return result;
+ const polygons=f.footprint.type==='MultiPolygon'?f.footprint.coordinates:[f.footprint.coordinates];
+ for(const rings of polygons){
+  if(!rings.length)continue;
+  const positions=ring=>ring.map(p=>C.Cartesian3.fromDegrees(p[0],p[1],1));
+  const hierarchy=new C.PolygonHierarchy(positions(rings[0].slice(0,-1)),rings.slice(1).map(r=>new C.PolygonHierarchy(positions(r.slice(0,-1)))));
+  result.push(viewer.entities.add({polygon:{hierarchy,height:1,material:color.withAlpha(.13),arcType:C.ArcType.GEODESIC}}));
+  for(const ring of rings)result.push(viewer.entities.add({polyline:{positions:positions(ring),width:2,material:color,arcType:C.ArcType.GEODESIC}}));
+ }
+ return result;
+}
+function updateVisibility(){for(const o of objects){o.points.show=o.visible&&document.getElementById('show-points').checked;o.marker.show=o.visible;o.marker.label.show=document.getElementById('show-labels').checked;for(const e of o.coverage)e.show=o.visible&&document.getElementById('show-coverage').checked;}viewer.scene.requestRender();}
+for(const id of ['show-points','show-coverage','show-labels'])document.getElementById(id).onchange=updateVisibility;
+async function cacheInfo(){if(cacheBusy||document.hidden)return;cacheBusy=true;try{const info=await localJson('cache-status'),v=document.getElementById('base').value,id=v.startsWith('service:')?v.split(':')[1]:'osm',active=info.providers.find(p=>p.id===id),target=document.getElementById('cache-data');target.replaceChildren();for(const p of info.providers){const d=document.createElement('p');d.textContent=p.name+': '+(p.tiles===null?'готовая база':p.tiles+' тайлов')+'; '+(p.bytes/1048576).toFixed(2)+' МиБ. '+p.policy+'. Последняя запись: '+(p.last_write?new Date(p.last_write*1000).toLocaleString():'нет')+'. Путь: '+p.path;d.style.overflowWrap='anywhere';target.append(d);}document.getElementById('cache-summary').textContent=active?'Кэш '+active.name+': '+active.tiles+' тайлов, '+(active.bytes/1048576).toFixed(2)+' МиБ. '+active.policy:'';}catch(e){document.getElementById('cache-summary').textContent='Состояние кэша временно недоступно.';}finally{cacheBusy=false;}}
+document.getElementById('cache-refresh').onclick=cacheInfo;
+document.getElementById('cache-details').ontoggle=()=>{if(document.getElementById('cache-details').open)cacheInfo();};
+setInterval(()=>{if(document.getElementById('cache-details').open||document.getElementById('base').value!=='earth')cacheInfo();},15000);
+
+function fly(positions,minimum=800){if(positions.length)viewer.camera.flyToBoundingSphere(C.BoundingSphere.fromPoints(positions),{duration:1,offset:new C.HeadingPitchRange(0,-Math.PI/2,Math.max(minimum,C.BoundingSphere.fromPoints(positions).radius*3))});}
+document.getElementById('all').onclick=()=>fly(allPositions,100000);
+async function refresh(){if(refreshBusy||document.hidden)return;refreshBusy=true;try{const data=await localJson('scene?since='+revision);if(data.revision===revision)return;revision=data.revision;for(const o of objects){viewer.scene.primitives.remove(o.points);viewer.entities.remove(o.marker);for(const e of o.coverage)viewer.entities.remove(e);}objects=[];allPositions=[];list.replaceChildren();err.textContent='';
+for(let i=0;i<data.files.length;i++){const f=data.files[i],row=document.createElement('div');row.className='file';const label=document.createElement('div');label.textContent=f.name;row.append(label);const note=document.createElement('div');note.className='muted';row.append(note);list.append(row);
+if(f.error){note.textContent=f.error;continue;}
+const color=C.Color.fromHsl((i*.618)%1,.8,.6),points=new C.PointPrimitiveCollection(),positions=[];
+for(const p of f.points){const pos=C.Cartesian3.fromDegrees(p[0],p[1],3);positions.push(pos);points.add({position:pos,color,pixelSize:2,disableDepthTestDistance:Number.POSITIVE_INFINITY});}
+viewer.scene.primitives.add(points);const center=C.Cartesian3.fromDegrees(f.center[0],f.center[1],5);const marker=viewer.entities.add({position:center,point:{pixelSize:9,color,outlineColor:C.Color.BLACK,outlineWidth:1,disableDepthTestDistance:Number.POSITIVE_INFINITY},label:{text:f.name,font:'13px sans-serif',pixelOffset:new C.Cartesian2(0,-18),showBackground:true,disableDepthTestDistance:Number.POSITIVE_INFINITY,distanceDisplayCondition:new C.DistanceDisplayCondition(0,2e6)}});
+const extent=f.extent.map(p=>C.Cartesian3.fromDegrees(p[0],p[1],0));allPositions.push(...extent);const coverage=footprintEntities(f,color),object={points,marker,coverage,visible:true};objects.push(object);
+note.textContent=`${f.total.toLocaleString()} точек; на экране ${f.points.length}. `+(f.coverage_complete?`Покрытие: все ${f.coverage_points.toLocaleString()} точек; сетка ${f.coverage_cell_m} м`+(f.coverage_cached?' (кэш)':'')+'. ':f.coverage_error?'Покрытие не построено: '+f.coverage_error+'. ':'Быстрый обзор; полное покрытие рассчитывается в City3D. ')+f.transform;
+note.title=f.source_crs_wkt||f.transform;
+const box=document.createElement('input');box.type='checkbox';box.checked=true;box.onchange=()=>{object.visible=box.checked;updateVisibility();};row.append(box);const go=document.createElement('button');go.textContent='Перейти к LAS';go.onclick=()=>fly(extent.length?extent:positions);row.append(go);}
+updateVisibility();
+state.textContent=`Файлов: ${data.files.length}; размещено: ${objects.length}`;window.city3dFileCount=objects.length;window.city3dCoverageCount=objects.filter(o=>o.coverage.length).length;if(first&&allPositions.length){first=false;fly(allPositions,4000000);}viewer.scene.requestRender();
+}catch(e){err.textContent='Обновление недоступно. Убедитесь, что City3D открыт. '+e.message;}finally{refreshBusy=false;}}
+await refresh();setInterval(refresh,2000);setInterval(async()=>{const v=document.getElementById('base').value;if(creditBusy||document.hidden)return;if(v.startsWith('service:')){creditBusy=true;try{const d=await localJson('credits/'+v.split(':')[1]);document.getElementById('vendor-credit').textContent=d.text;}catch(e){}finally{creditBusy=false;}}else document.getElementById('vendor-credit').textContent='';},1500);
+}catch(e){err.textContent='Глобус не запущен: '+e.message+'. Проверьте WebGL в браузере.';}})();
+</script></body></html>

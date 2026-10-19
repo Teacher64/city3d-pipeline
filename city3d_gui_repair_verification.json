@@ -1,0 +1,46 @@
+{
+  "time": "2026-10-16T13:28:45.193946+00:00",
+  "python": "3.14.4 (main, Aug 20 2026, 10:41:58) [GCC 15.2.0]",
+  "target": "/mnt/data_sda1/PR_3D_SPB/city3d-pipeline/city3d_pipeline_v5.py",
+  "source_sha256": "5e1fa99fbf7c00845d628598e9ace6598b0b86d297a5564b7f8088781be86a9f",
+  "status": "installed",
+  "qt_stdout": "{\"status\": \"passed\", \"sizes\": [[800, 480], [1024, 600], [1366, 650], [1920, 900]], \"records\": 40, \"checks\": [\"all_buttons_scroll_reachable\", \"buttons_no_overlap\", \"apply_visible\", \"select_all_clear\", \"two_files_and_scan_types\", \"save_name_and_selection\", \"database_button_dispatch\", \"apply_button_dispatch\", \"file_dialog_dispatch\", \"selected_row_crs\", \"idempotent_layout\"], \"limitations\": \"Offscreen Qt; viewer stub; no real DB, GPU, LAS processing or full application launch.\"}\n",
+  "qt_stderr": "This plugin does not support propagateSizeHints()\n",
+  "gui_test": {
+    "status": "passed",
+    "sizes": [
+      [
+        800,
+        480
+      ],
+      [
+        1024,
+        600
+      ],
+      [
+        1366,
+        650
+      ],
+      [
+        1920,
+        900
+      ]
+    ],
+    "records": 40,
+    "checks": [
+      "all_buttons_scroll_reachable",
+      "buttons_no_overlap",
+      "apply_visible",
+      "select_all_clear",
+      "two_files_and_scan_types",
+      "save_name_and_selection",
+      "database_button_dispatch",
+      "apply_button_dispatch",
+      "file_dialog_dispatch",
+      "selected_row_crs",
+      "idempotent_layout"
+    ],
+    "limitations": "Offscreen Qt; viewer stub; no real DB, GPU, LAS processing or full application launch."
+  },
+  "backup": "/mnt/data_sda1/city3d-backups/city3d_gui_layout_20261016T132845_196318Z"
+}

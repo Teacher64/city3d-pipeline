@@ -1,0 +1,35 @@
+{
+  "time": "2026-10-19T07:46:08.927349+00:00",
+  "python": "3.14.4 (main, Aug 20 2026, 10:41:58) [GCC 15.2.0]",
+  "target": "/mnt/data_sda1/PR_3D_SPB/city3d-pipeline/city3d_pipeline_v5.py",
+  "source_sha256": "7d4d6529079e1e674e2e70d0e32139f267dd1a6fadab97daf354f46cd99d641e",
+  "status": "installed",
+  "qt_stdout": "{\"status\": \"passed\", \"checks\": [\"real_LAS_index_in_QThread\", \"auto_check_and_preview\", \"two_LAS_preview\", \"real_build_revision_10_points\", \"full_loader_and_activation_without_OpenGL\", \"classes_preserved\", \"remove_invalidates_active_state\", \"source_files_preserved\", \"removal_persists_on_restart\", \"explicit_readd\", \"mixed_UTM_zones_align\", \"missing_CRS_does_not_block_other_files\", \"bounded_LAS_read_16000_of_100000\", \"worker_error_log\", \"compact_buttons\", \"MBTiles_TMS_rows\", \"offline_cache_miss_no_network\", \"WMS_1_3_axis_order\", \"service_registry\"], \"limitations\": \"Qt offscreen; synthetic LAS; Open3D container and GL widget substituted; DB enrichment disabled. No real GPU/DB test.\"}\n",
+  "qt_stderr": "",
+  "gui_test": {
+    "status": "passed",
+    "checks": [
+      "real_LAS_index_in_QThread",
+      "auto_check_and_preview",
+      "two_LAS_preview",
+      "real_build_revision_10_points",
+      "full_loader_and_activation_without_OpenGL",
+      "classes_preserved",
+      "remove_invalidates_active_state",
+      "source_files_preserved",
+      "removal_persists_on_restart",
+      "explicit_readd",
+      "mixed_UTM_zones_align",
+      "missing_CRS_does_not_block_other_files",
+      "bounded_LAS_read_16000_of_100000",
+      "worker_error_log",
+      "compact_buttons",
+      "MBTiles_TMS_rows",
+      "offline_cache_miss_no_network",
+      "WMS_1_3_axis_order",
+      "service_registry"
+    ],
+    "limitations": "Qt offscreen; synthetic LAS; Open3D container and GL widget substituted; DB enrichment disabled. No real GPU/DB test."
+  },
+  "backup": "/mnt/data_sda1/city3d-backups/city3d_globe_20261019T074608_930431Z"
+}
